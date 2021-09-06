@@ -19,4 +19,4 @@ See dependencies from `#include`(s):
  - GLAD: `vcpkg install glad`.
  - GLFW: `vcpkg install glfw3`.
 
-Once installed, compile and link with no special options.
+Once installed, compile and link with C++20 enabled.

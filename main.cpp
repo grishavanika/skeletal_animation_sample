@@ -23,6 +23,7 @@
 #include <map>
 #include <stack>
 #include <string>
+#include <string_view>
 #include <vector>
 #include <optional>
 #include <iterator>
@@ -101,7 +102,7 @@ private:
         assert(frames.size() >= 2);
         for (std::size_t index = 0, count = frames.size(); index < (count - 1); ++index)
         {
-            if (animation_time < frames[index + 1].timeStamp)
+            if (animation_time < frames[index + 1].time_stamp)
             {
                 return int(index);
             }
@@ -164,6 +165,11 @@ private:
     static int UpdateFrameIndex(const std::vector<Key>& frames
         , float animation_time, int prev_known_index, float prev_animation_time)
     {
+#if (0)
+        (void)prev_animation_time;
+        (void)prev_known_index;
+        return GetFrameIndex_Simple(frames, animation_time);
+#else
         assert(prev_known_index < int(frames.size()));
         if (prev_known_index < 0)
         {
@@ -178,6 +184,7 @@ private:
         }
         // else: animation_time < prev_animation_time
         return GetFrameIndex(frames, animation_time, 0, prev_known_index);
+#endif
     }
 
     static float GetScaleFactor(float prev_time_stamp, float next_time_stamp, float animation_time)
@@ -487,13 +494,13 @@ static std::vector<AnimMesh> Assimp_LoadModelMeshWithAnimationsWeights(
         const aiNode* const node = dfs.top();
         dfs.pop();
 
-        for (unsigned i = 0; i < node->mNumMeshes; i++)
+        for (unsigned i = 0; i < node->mNumMeshes; ++i)
         {
             const aiMesh* const mesh = scene.mMeshes[node->mMeshes[i]];
             assert(mesh);
             meshes.push_back(Assimp_LoadMesh(model_path, scene, *mesh, bone_info));
         }
-        for (unsigned i = 0; i < node->mNumChildren; i++)
+        for (unsigned i = 0; i < node->mNumChildren; ++i)
         {
             dfs.push(node->mChildren[i]);
         }
@@ -567,7 +574,7 @@ static Animation Assimp_LoadAnimation(const aiScene& scene, const BoneInfoRemap&
         node_names.push_back(&data.src->mName);
         const int parent_index = int(nodes.size() - 1);
 
-        for (unsigned i = 0; i < data.src->mNumChildren; i++)
+        for (unsigned i = 0; i < data.src->mNumChildren; ++i)
         {
             dfs.push(Node{data.src->mChildren[i], parent_index});
         }
@@ -895,21 +902,15 @@ void main()
         glUseProgram(shader_hanle);
         model._diffuse.texture_unit = 1;
         model._diffuse.location = glGetUniformLocation(shader_hanle, "diffuse");
-        assert(model._diffuse.location >= 0);
         model._projection_ptr = glGetUniformLocation(shader_hanle, "projection");
-        assert(model._projection_ptr >= 0);
         model._view_ptr = glGetUniformLocation(shader_hanle, "view");
-        assert(model._view_ptr >= 0);
         model._model_ptr = glGetUniformLocation(shader_hanle, "model");
+        model._transforms_ptr = glGetUniformLocation(shader_hanle, "bone_transforms");
+        assert(model._diffuse.location >= 0);
+        assert(model._projection_ptr >= 0);
+        assert(model._view_ptr >= 0);
         assert(model._model_ptr >= 0);
-        model._transform_ptrs.resize(Animation::kMaxBonesCount);
-        for (int i = 0; i < int(Animation::kMaxBonesCount); ++i)
-        {
-            const std::string name = "bone_transforms[" + std::to_string(i) + "]";
-            const int ptr = glGetUniformLocation(shader_hanle, name.c_str());
-            assert(ptr >= 0);
-            model._transform_ptrs[i] = ptr;
-        }
+        assert(model._transforms_ptr >= 0);
         return model;
     }
 
@@ -918,15 +919,12 @@ void main()
         , glm::mat4 view
         , glm::mat4 model)
     {
-        assert(_transform_ptrs.size() == transforms.size());
+        assert(Animation::kMaxBonesCount == transforms.size());
         glUseProgram(_shader._id);
         glUniformMatrix4fv(_projection_ptr, 1, GL_FALSE, glm::value_ptr(projection));
         glUniformMatrix4fv(_view_ptr, 1, GL_FALSE, glm::value_ptr(view));
         glUniformMatrix4fv(_model_ptr, 1, GL_FALSE, glm::value_ptr(model));
-        for (int i = 0; i < transforms.size(); ++i)
-        {
-            glUniformMatrix4fv(_transform_ptrs[i], 1, GL_FALSE, glm::value_ptr(transforms[i]));
-        }
+        glUniformMatrix4fv(_transforms_ptr, GLsizei(transforms.size()), GL_FALSE, glm::value_ptr(transforms[0]));
 
         for (RenderMesh& mesh : _meshes)
         {
@@ -946,7 +944,7 @@ private:
     int _projection_ptr = -1;
     int _view_ptr = -1;
     int _model_ptr = -1;
-    std::vector<int> _transform_ptrs;
+    int _transforms_ptr = -1;
 };
 
 static std::vector<RenderMesh> OpenGL_ToRenderMesh(std::vector<AnimMesh>&& anim_meshes
@@ -1122,11 +1120,11 @@ static void HandleInput(GLFWwindow* window)
         glm::vec3 delta;
     } key_delta[] =
     {
-        {GLFW_KEY_W, camera._front},
+        {GLFW_KEY_W, +camera._front},
         {GLFW_KEY_S, -camera._front},
+        {GLFW_KEY_D, +camera._right},
         {GLFW_KEY_A, -camera._right},
-        {GLFW_KEY_D, camera._right},
-        {GLFW_KEY_E, camera._up},
+        {GLFW_KEY_E, +camera._up},
         {GLFW_KEY_Q, -camera._up},
     };
     for (const auto& [key, delta] : key_delta)
