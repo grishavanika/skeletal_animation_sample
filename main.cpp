@@ -850,11 +850,11 @@ struct RenderModel
         const char* vertex_shader = R"(
 #version 330 core
 
-layout(location = 0) in vec3 pos;
-layout(location = 1) in vec3 norm;
-layout(location = 2) in vec2 uv;
-layout(location = 3) in ivec4 bone_ids;
-layout(location = 4) in vec4 weights;
+layout(location = 0) in vec3 in_Position;
+layout(location = 1) in vec3 in_Normal;
+layout(location = 2) in vec2 in_UV;
+layout(location = 3) in ivec4 in_BoneIds;
+layout(location = 4) in vec4 in_Weights;
 
 uniform mat4 projection;
 uniform mat4 view;
@@ -863,36 +863,66 @@ uniform mat4 model;
 // See kMaxBonesCount.
 uniform mat4 bone_transforms[100];
 
-out vec2 TexCoords;
+out vec2 v_UV;
+out vec3 v_Normal;
+out vec3 v_Position;
 
 void main()
 {
-    vec4 position = vec4(0.0f);
-    for (int i = 0; i < 4 ; ++i)
+    mat4 T = mat4(0.f);
+    for (int i = 0; i < 4; ++i)
     {
-        if (bone_ids[i] == -1)
+        if (in_BoneIds[i] >= 0)
         {
-            continue;
+            T += (bone_transforms[in_BoneIds[i]] * in_Weights[i]);
         }
-        vec4 local = bone_transforms[bone_ids[i]] * vec4(pos,1.0f);
-        position += local * weights[i];
     }
 
-    gl_Position =  projection * view * model * position;
-    TexCoords = uv;
+    mat4 MVP = projection * view * model;
+    gl_Position = MVP * T * vec4(in_Position, 1.f);
+    v_UV = in_UV;
+    v_Normal = normalize(mat3(T) * in_Normal);
+    v_Position = vec3(model * vec4(in_Position, 1.f));
 }
 )";
         const char* fragment_shader = R"(
 #version 330 core
-out vec4 FragColor;
 
-in vec2 TexCoords;
+uniform sampler2D diffuse_sampler;
+uniform vec3 light_position;
+uniform vec3 view_position;
 
-uniform sampler2D diffuse;
+in vec2 v_UV;
+in vec3 v_Normal;
+in vec3 v_Position;
+
+out vec4 _Color;
 
 void main()
-{    
-    FragColor = texture(diffuse, TexCoords);
+{
+    vec3 light_color = vec3(1.f, 1.f, 1.f);
+    float abbient_K = 0.6f;
+    float specular_K = 0.9f;
+    float specular_P = 32f;
+
+    // Ambient.
+    vec3 ambient = abbient_K * light_color;
+    
+    // Diffuse.
+    vec3 N = normalize(v_Normal);
+    vec3 light_dir = normalize(light_position - v_Position);
+    float diff = max(dot(N, light_dir), 0.f);
+    vec3 diffuse = diff * light_color;
+    
+    // Specular.
+    vec3 view_dir = normalize(view_position - v_Position);
+    vec3 reflect_dir = reflect(-light_dir, N);
+    float spec = pow(max(dot(view_dir, reflect_dir), 0.f), specular_P);
+    vec3 specular = specular_K * spec * light_color;
+    
+    vec3 object_color = vec3(texture(diffuse_sampler, v_UV));
+    vec3 color = (ambient + diffuse + specular) * object_color;
+    _Color = vec4(color, 1.f);
 }
 )";
 
@@ -901,23 +931,29 @@ void main()
         const unsigned shader_hanle = model._shader._id;
         glUseProgram(shader_hanle);
         model._diffuse.texture_unit = 1;
-        model._diffuse.location = glGetUniformLocation(shader_hanle, "diffuse");
+        model._diffuse.location = glGetUniformLocation(shader_hanle, "diffuse_sampler");
         model._projection_ptr = glGetUniformLocation(shader_hanle, "projection");
         model._view_ptr = glGetUniformLocation(shader_hanle, "view");
         model._model_ptr = glGetUniformLocation(shader_hanle, "model");
         model._transforms_ptr = glGetUniformLocation(shader_hanle, "bone_transforms");
+        model._light_position_ptr = glGetUniformLocation(shader_hanle, "light_position");
+        model._view_position_ptr = glGetUniformLocation(shader_hanle, "view_position");
         assert(model._diffuse.location >= 0);
         assert(model._projection_ptr >= 0);
         assert(model._view_ptr >= 0);
         assert(model._model_ptr >= 0);
         assert(model._transforms_ptr >= 0);
+        assert(model._light_position_ptr >= 0);
+        assert(model._view_position_ptr >= 0);
         return model;
     }
 
     void draw(const std::vector<glm::mat4>& transforms
         , glm::mat4 projection
         , glm::mat4 view
-        , glm::mat4 model)
+        , glm::mat4 model
+        , glm::vec3 light_position
+        , glm::vec3 view_position)
     {
         assert(Animation::kMaxBonesCount == transforms.size());
         glUseProgram(_shader._id);
@@ -925,6 +961,8 @@ void main()
         glUniformMatrix4fv(_view_ptr, 1, GL_FALSE, glm::value_ptr(view));
         glUniformMatrix4fv(_model_ptr, 1, GL_FALSE, glm::value_ptr(model));
         glUniformMatrix4fv(_transforms_ptr, GLsizei(transforms.size()), GL_FALSE, glm::value_ptr(transforms[0]));
+        glUniform3fv(_light_position_ptr, 1, glm::value_ptr(light_position));
+        glUniform3fv(_view_ptr, 1, glm::value_ptr(view_position));
 
         for (RenderMesh& mesh : _meshes)
         {
@@ -945,6 +983,8 @@ private:
     int _view_ptr = -1;
     int _model_ptr = -1;
     int _transforms_ptr = -1;
+    int _light_position_ptr = -1;
+    int _view_position_ptr = -1;
 };
 
 static std::vector<RenderMesh> OpenGL_ToRenderMesh(std::vector<AnimMesh>&& anim_meshes
@@ -1187,10 +1227,13 @@ int main(int argc, char* argv[])
         const glm::mat4 view = app.camera.view_matrix();
         const glm::mat4 model = glm::mat4(1.0f);
 
-        glClearColor(1.f, 1.f, 1.f, 1.f);
+        glClearColor(0.f, 0.f, 0.f, 1.f);
         glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
 
-        render_model.draw(animation.transforms(), projection, view, model);
+        render_model.draw(animation.transforms()
+            , projection, view, model
+            , glm::vec3(0.0f, 1.0f, 3.0f) // Light position.
+            , app.camera._position);
 
         glfwSwapBuffers(window);
         glfwPollEvents();
