@@ -49,6 +49,8 @@ struct AnimVertex
     glm::vec2 texture_uv;
     BoneIndex bone_ids[4];
     float weights[4];
+    glm::vec3 tangent;
+    glm::vec3 bitangent;
 };
 
 struct KeyPosition
@@ -390,11 +392,15 @@ static AnimMesh Assimp_LoadMesh(
         aiVector3D* uvs = mesh.mTextureCoords[0];
         assert(uvs);
         assert(mesh.mNormals);
+        assert(mesh.mTangents);
+        assert(mesh.mBitangents);
         vertices.push_back(AnimVertex{});
         AnimVertex& v = vertices.back();
         v.position = Vec_ToGLM(mesh.mVertices[i]);
         v.normal = Vec_ToGLM(mesh.mNormals[i]);
         v.texture_uv = glm::vec2(uvs[i].x, uvs[i].y);
+        v.tangent = Vec_ToGLM(mesh.mTangents[i]);
+        v.bitangent = Vec_ToGLM(mesh.mBitangents[i]);
         std::fill(std::begin(v.bone_ids), std::end(v.bone_ids), -1);
         std::fill(std::begin(v.weights), std::end(v.weights), 0.f);
     }
@@ -441,6 +447,34 @@ static AnimMesh Assimp_LoadMesh(
             }
         }
     }
+
+#if (1) // STUPID HACK. Assimp & COLLADA do not see normal map.
+    auto normal_it = std::find_if(textures.cbegin(), textures.cend()
+        , [](const AnimTexture& t) { return t.type == TextureType::Normal; });
+    auto diffuse_it = std::find_if(textures.cbegin(), textures.cend()
+        , [](const AnimTexture& t) { return t.type == TextureType::Diffuse; });
+    if ((normal_it == textures.cend())
+        && (diffuse_it != textures.cend()))
+    {
+        // Don't see Normal texture, but there is Diffuse one.
+        // Try to guess Normal file's path.
+        auto name = diffuse_it->file_path.filename().string();
+        const char kDiffusePart[] = "diffuse";
+        const auto p = name.find(kDiffusePart);
+        if (p != name.npos)
+        {
+            name.replace(p, std::size(kDiffusePart) - 1, "normal");
+        }
+        AnimTexture t;
+        t.file_path = diffuse_it->file_path;
+        t.file_path.replace_filename(name);
+        t.type = TextureType::Normal;
+        if (std::filesystem::exists(t.file_path))
+        {
+            textures.push_back(t);
+        }
+    }
+#endif
 
     // Bones weights for each vertex.
     auto add_bone_weight_to_vertex = [](AnimVertex& vertex, BoneIndex bone_index, float weight)
@@ -692,10 +726,18 @@ public:
         glEnableVertexAttribArray(4);
         glVertexAttribPointer(4, 4/*float[4]*/, GL_FLOAT, GL_FALSE
             , sizeof(AnimVertex), (void*)offsetof(AnimVertex, weights));
+        glEnableVertexAttribArray(5);
+        glVertexAttribPointer(5, 3/*vec3*/, GL_FLOAT, GL_FALSE
+            , sizeof(AnimVertex), (void*)offsetof(AnimVertex, tangent));
+        glEnableVertexAttribArray(6);
+        glVertexAttribPointer(6, 3/*vec3*/, GL_FLOAT, GL_FALSE
+            , sizeof(AnimVertex), (void*)offsetof(AnimVertex, bitangent));
         glBindVertexArray(0);
 
         return RenderMesh(VAO, VBO, EBO
-            , indices.size(), GetTexture(textures, TextureType::Diffuse));
+            , indices.size()
+            , GetTexture(textures, TextureType::Diffuse)
+            , GetTexture(textures, TextureType::Normal));
     }
 
     RenderMesh(const RenderMesh&) = delete;
@@ -707,6 +749,7 @@ public:
         , _EBO(std::exchange(rhs._EBO, 0))
         , _indicies_count(std::exchange(rhs._indicies_count, 0))
         , _diffuse(std::move(rhs._diffuse))
+        , _normal(std::move(rhs._normal))
     {
     }
     ~RenderMesh()
@@ -730,23 +773,27 @@ public:
         return std::move(*it);
     }
 
-    void draw(TextureLocation diffuse)
+    void draw(TextureLocation diffuse, TextureLocation normal)
     {
         glBindVertexArray(_VAO);
         glActiveTexture(GL_TEXTURE0 + diffuse.texture_unit);
         glUniform1i(diffuse.location, _diffuse.texture_name);
         glBindTexture(GL_TEXTURE_2D, _diffuse.texture_name);
+        glActiveTexture(GL_TEXTURE0 + normal.texture_unit);
+        glUniform1i(normal.location, _normal.texture_name);
+        glBindTexture(GL_TEXTURE_2D, _normal.texture_name);
         glDrawElements(GL_TRIANGLES, GLsizei(_indicies_count), GL_UNSIGNED_INT, 0);
     }
 
 private:
     explicit RenderMesh(unsigned VAO, unsigned VBO, unsigned EBO
-        , std::size_t indicies_count, RenderTexture&& diffuse)
+        , std::size_t indicies_count, RenderTexture&& diffuse, RenderTexture&& normal)
         : _VAO(VAO)
         , _VBO(VBO)
         , _EBO(EBO)
         , _indicies_count(indicies_count)
         , _diffuse(std::move(diffuse))
+        , _normal(std::move(normal))
     {
     }
     unsigned _VAO;
@@ -754,6 +801,7 @@ private:
     unsigned _EBO;
     std::size_t _indicies_count;
     RenderTexture _diffuse;
+    RenderTexture _normal;
 };
 
 static RenderTexture OpenGL_LoadTexture(const AnimTexture& raw_texture)
@@ -855,6 +903,8 @@ layout(location = 1) in vec3 in_Normal;
 layout(location = 2) in vec2 in_UV;
 layout(location = 3) in ivec4 in_BoneIds;
 layout(location = 4) in vec4 in_Weights;
+layout(location = 5) in vec3 in_Tangent;
+layout(location = 6) in vec3 in_Bitangent;
 
 uniform mat4 projection;
 uniform mat4 view;
@@ -864,37 +914,43 @@ uniform mat4 model;
 uniform mat4 bone_transforms[100];
 
 out vec2 v_UV;
-out vec3 v_Normal;
 out vec3 v_Position;
+out mat3 v_TBN;
 
 void main()
 {
-    mat4 T = mat4(0.f);
+    mat4 S = mat4(0.f);
     for (int i = 0; i < 4; ++i)
     {
         if (in_BoneIds[i] >= 0)
         {
-            T += (bone_transforms[in_BoneIds[i]] * in_Weights[i]);
+            S += (bone_transforms[in_BoneIds[i]] * in_Weights[i]);
         }
     }
-
+    mat3 S_ = transpose(inverse(mat3(S)));
     mat4 MVP = projection * view * model;
-    gl_Position = MVP * T * vec4(in_Position, 1.f);
+
+    gl_Position = MVP * S * vec4(in_Position, 1.f);
     v_UV = in_UV;
-    v_Normal = normalize(mat3(T) * in_Normal);
     v_Position = vec3(model * vec4(in_Position, 1.f));
+    
+    vec3 T = normalize(S_ * in_Tangent);
+    vec3 B = normalize(S_ * in_Bitangent);
+    vec3 N = normalize(S_ * in_Normal);
+    v_TBN = mat3(T, B, N);
 }
 )";
         const char* fragment_shader = R"(
 #version 330 core
 
 uniform sampler2D diffuse_sampler;
+uniform sampler2D normal_sampler;
 uniform vec3 light_position;
 uniform vec3 view_position;
 
 in vec2 v_UV;
-in vec3 v_Normal;
 in vec3 v_Position;
+in mat3 v_TBN;
 
 out vec4 _Color;
 
@@ -909,7 +965,10 @@ void main()
     vec3 ambient = abbient_K * light_color;
     
     // Diffuse.
-    vec3 N = normalize(v_Normal);
+    vec3 N = vec3(texture(normal_sampler, v_UV));
+    N = N * 2.0 - 1.0;
+    N = normalize(v_TBN * N);
+
     vec3 light_dir = normalize(light_position - v_Position);
     float diff = max(dot(N, light_dir), 0.f);
     vec3 diffuse = diff * light_color;
@@ -932,6 +991,8 @@ void main()
         glUseProgram(shader_hanle);
         model._diffuse.texture_unit = 1;
         model._diffuse.location = glGetUniformLocation(shader_hanle, "diffuse_sampler");
+        model._normal.texture_unit = 2;
+        model._normal.location = glGetUniformLocation(shader_hanle, "normal_sampler");
         model._projection_ptr = glGetUniformLocation(shader_hanle, "projection");
         model._view_ptr = glGetUniformLocation(shader_hanle, "view");
         model._model_ptr = glGetUniformLocation(shader_hanle, "model");
@@ -939,6 +1000,7 @@ void main()
         model._light_position_ptr = glGetUniformLocation(shader_hanle, "light_position");
         model._view_position_ptr = glGetUniformLocation(shader_hanle, "view_position");
         assert(model._diffuse.location >= 0);
+        assert(model._normal.location >= 0);
         assert(model._projection_ptr >= 0);
         assert(model._view_ptr >= 0);
         assert(model._model_ptr >= 0);
@@ -962,11 +1024,11 @@ void main()
         glUniformMatrix4fv(_model_ptr, 1, GL_FALSE, glm::value_ptr(model));
         glUniformMatrix4fv(_transforms_ptr, GLsizei(transforms.size()), GL_FALSE, glm::value_ptr(transforms[0]));
         glUniform3fv(_light_position_ptr, 1, glm::value_ptr(light_position));
-        glUniform3fv(_view_ptr, 1, glm::value_ptr(view_position));
+        glUniform3fv(_view_position_ptr, 1, glm::value_ptr(view_position));
 
         for (RenderMesh& mesh : _meshes)
         {
-            mesh.draw(_diffuse);
+            mesh.draw(_diffuse, _normal);
         }
     }
 
@@ -979,6 +1041,7 @@ private:
     OpenGL_ShaderProgram _shader;
     std::vector<RenderMesh> _meshes;
     TextureLocation _diffuse;
+    TextureLocation _normal;
     int _projection_ptr = -1;
     int _view_ptr = -1;
     int _model_ptr = -1;
@@ -1029,6 +1092,7 @@ static AssimpOpenGL_Model AssimpOpenGL_LoadAnimatedMode(const std::filesystem::p
     (void)importer.SetPropertyInteger(AI_CONFIG_PP_LBW_MAX_WEIGHTS, 4);
     const aiScene* scene = importer.ReadFile(model_path.string()
         , aiProcess_Triangulate
+        | aiProcess_CalcTangentSpace
         | aiProcess_FlipUVs
         | aiProcess_LimitBoneWeights);
     assert(scene);
@@ -1039,7 +1103,7 @@ static AssimpOpenGL_Model AssimpOpenGL_LoadAnimatedMode(const std::filesystem::p
     std::vector<AnimMesh> anim_meshes = Assimp_LoadModelMeshWithAnimationsWeights(model_path, *scene, bone_info);
     Animation animation = Assimp_LoadAnimation(*scene, bone_info);
     // Load only diffuse textures, since nothing else is used.
-    auto meshes = OpenGL_ToRenderMesh(std::move(anim_meshes), {TextureType::Diffuse});
+    auto meshes = OpenGL_ToRenderMesh(std::move(anim_meshes), {TextureType::Diffuse, TextureType::Normal});
     return AssimpOpenGL_Model{RenderModel::Make_NoLighting(std::move(meshes)), std::move(animation)};
 }
 
@@ -1181,7 +1245,7 @@ int main(int argc, char* argv[])
 {
     assert(argc >= 2 && "app.exe <path to model to load>");
     glfwInit();
-    glfwWindowHint(GLFW_CONTEXT_VERSION_MAJOR, 4);
+    glfwWindowHint(GLFW_CONTEXT_VERSION_MAJOR, 3);
     glfwWindowHint(GLFW_CONTEXT_VERSION_MINOR, 3);
     glfwWindowHint(GLFW_OPENGL_PROFILE, GLFW_OPENGL_CORE_PROFILE);
 
