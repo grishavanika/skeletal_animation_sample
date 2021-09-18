@@ -2,6 +2,10 @@
 // https://learnopengl.com/Guest-Articles/2020/Skeletal-Animation.
 // Refactored and simplified.
 // 
+// `_global_inverse` fix comes from https://ogldev.org/www/tutorial38/tutorial38.html.
+// See `m_GlobalInverseTransform`.
+// 
+
 #include <assimp/Importer.hpp>
 #include <assimp/matrix4x4.h>
 #include <assimp/postprocess.h>
@@ -30,6 +34,7 @@
 #include <iterator>
 #include <algorithm>
 #include <filesystem>
+#include <charconv>
 
 #include <cmath>
 
@@ -252,8 +257,9 @@ public:
     // Limit from Vertex shader.
     static constexpr std::size_t kMaxBonesCount = 100;
 
-    explicit Animation(std::vector<AnimNode>&& nodes, unsigned bones_count, float duration, float ticks_per_second)
-        : _transforms(kMaxBonesCount, glm::mat4(1.0f))
+    explicit Animation(glm::mat4 root_inverse, std::vector<AnimNode>&& nodes, unsigned bones_count, float duration, float ticks_per_second)
+        : _global_inverse(root_inverse)
+        , _transforms(kMaxBonesCount, glm::mat4(1.0f))
         , _nodes(std::move(nodes))
         , _bones_count(bones_count)
         , _current_time(0.f)
@@ -287,7 +293,8 @@ public:
                 const std::size_t bone_index = node.bone->_bone_index;
                 assert(bone_index < _transforms.size()
                     && "Too many bones. See kMaxBonesCount limit.");
-                _transforms[bone_index] = final_ * node.bone->_local_space_to_bone;
+                _transforms[bone_index] =
+                    _global_inverse * final_ * node.bone->_local_space_to_bone;
             }
         }
     }
@@ -298,6 +305,7 @@ public:
     }
 
 private:
+    glm::mat4 _global_inverse;
     std::vector<glm::mat4> _transforms;
     std::vector<AnimNode> _nodes;
     unsigned _bones_count;
@@ -637,8 +645,9 @@ static Animation Assimp_LoadAnimation(const aiScene& scene, const BoneInfoRemap&
         node.bone.emplace(Assimp_LoadBoneKeyFrames(*channel, *_bone_info));
     }
 
+    const glm::mat4 root = Matrix_RowToColumn(scene.mRootNode->mTransformation);
     const unsigned bones_count = unsigned(bone_info._name_to_info.size());
-    return Animation(std::move(nodes), bones_count, duration, ticks_per_second);
+    return Animation(glm::inverse(root), std::move(nodes), bones_count, duration, ticks_per_second);
 }
 
 ///////////////////////////////////////////////////////////////////////////////
@@ -932,16 +941,19 @@ void main()
             S += (bone_transforms[in_BoneIds[i]] * in_Weights[i]);
         }
     }
+    // Hope I didn't mess up with spaces and transforms.
     mat3 S_ = transpose(inverse(mat3(S)));
     mat4 MVP = projection * view * model;
+    mat4 M_ = transpose(inverse(model));
 
     gl_Position = MVP * S * vec4(in_Position, 1.f);
     v_UV = in_UV;
-    v_Position = vec3(model * vec4(in_Position, 1.f));
+    v_Position = vec3(M_ * vec4(in_Position, 1.f));
     
-    vec3 T = normalize(S_ * in_Tangent);
-    vec3 B = normalize(S_ * in_Bitangent);
-    vec3 N = normalize(S_ * in_Normal);
+    mat3 MS_ = mat3(M_) * S_;
+    vec3 T = normalize(MS_ * in_Tangent);
+    vec3 B = normalize(MS_ * in_Bitangent);
+    vec3 N = normalize(MS_ * in_Normal);
     v_TBN = mat3(T, B, N);
 }
 )";
@@ -1182,6 +1194,7 @@ struct FreeCamera
 struct AppState
 {
     FreeCamera camera = FreeCamera(glm::vec3(0.0f, 1.0f, 3.0f));
+    bool _pause_animation = false;
     float _dt = 0.f;
     float _last_frame_time = 0.f;
     int screen_width = 800;
@@ -1247,9 +1260,46 @@ static void HandleInput(GLFWwindow* window)
     }
 }
 
+static void OnKeyEvent(GLFWwindow* window, int key, int scancode, int action, int mods)
+{
+    (void)scancode;
+    (void)mods;
+    if ((key == GLFW_KEY_SPACE) && (action == GLFW_PRESS))
+    {
+        AppState* app = static_cast<AppState*>(glfwGetWindowUserPointer(window));
+        assert(app);
+        app->_pause_animation ^= true;
+    }
+}
+
+static float Get_ArgFloat(int argc, char* argv[], const char* name, float or_default = -1.f)
+{
+    int index = -1;
+    for (int i = 1; i < argc; ++i)
+    {
+        if (std::string_view(argv[i]) == name)
+        {
+            index = (i + 1);
+            break;
+        }
+    }
+    if ((index < 0) || (index >= argc))
+    {
+        return or_default;
+    }
+    float v = or_default;
+    const char* v_str = argv[index];
+    const char* v_end = v_str + strlen(v_str);
+    (void)std::from_chars(v_str, v_end, v);
+    return v;
+}
+
 int main(int argc, char* argv[])
 {
     assert(argc >= 2 && "app.exe <path to model to load>");
+    // Models from mixamo.com are HUGE, make them smaller.
+    const float model_scale = Get_ArgFloat(argc, argv, "--scale", 0.012f);
+
     glfwInit();
     glfwWindowHint(GLFW_CONTEXT_VERSION_MAJOR, 3);
     glfwWindowHint(GLFW_CONTEXT_VERSION_MINOR, 3);
@@ -1264,6 +1314,7 @@ int main(int argc, char* argv[])
     glfwSetFramebufferSizeCallback(window, OnWindowResize);
     glfwSetCursorPosCallback(window, OnMouseMove);
     glfwSetScrollCallback(window, OnMouseScroll);
+    glfwSetKeyCallback(window, OnKeyEvent);
     glfwSetInputMode(window, GLFW_CURSOR, GLFW_CURSOR_DISABLED);
     const int glad_ok = gladLoadGL();
     assert(glad_ok > 0);
@@ -1285,7 +1336,10 @@ int main(int argc, char* argv[])
         app._last_frame_time = current_time;
         HandleInput(window);
 
-        animation.update(app._dt);
+        if (!app._pause_animation)
+        {
+            animation.update(app._dt);
+        }
 
         if (app.screen_height <= 0)
         {
@@ -1298,7 +1352,7 @@ int main(int argc, char* argv[])
             , 0.1f     // Near.
             , 100.0f); // Far.
         const glm::mat4 view = app.camera.view_matrix();
-        const glm::mat4 model = glm::mat4(1.0f);
+        glm::mat4 model = model = glm::scale(glm::mat4(1.0f), glm::vec3(model_scale));
 
         glClearColor(0.f, 0.f, 0.f, 1.f);
         glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
