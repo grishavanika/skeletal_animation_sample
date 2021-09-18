@@ -76,7 +76,7 @@ struct BoneKeyFrames
 {
     // Constant run-time data.
     BoneIndex _bone_index = -1;
-    glm::mat4 _mesh_space_to_local = glm::mat4(1.f);
+    glm::mat4 _local_space_to_bone = glm::mat4(1.f);
     std::vector<KeyPosition> _positions;
     std::vector<KeyRotation> _rotations;
     std::vector<KeyScale> _scales;
@@ -239,11 +239,11 @@ struct AnimNode
 {
     // Runtime. Updated every frame.
     std::optional<BoneKeyFrames> bone;
-    glm::mat4 frame_transform;
+    glm::mat4 bone_transform;
 
     // Constant data.
     int parent = -1;
-    glm::mat4 bone_transform;
+    glm::mat4 node_transform;
 };
 
 class Animation
@@ -273,21 +273,21 @@ public:
             AnimNode& node = _nodes[i];
             assert(int(i) > node.parent);
 
-            const glm::mat4 node_transform = node.bone
+            const glm::mat4 bone_transform = node.bone
                 ? node.bone->interpolate_frames_at(_current_time)
-                : node.bone_transform;
+                : node.node_transform;
             const glm::mat4 parent_transform = (node.parent >= 0)
-                ? _nodes[node.parent].frame_transform
+                ? _nodes[node.parent].bone_transform
                 : glm::mat4(1.0f);
-            const glm::mat4 final_ = parent_transform * node_transform;
-            node.frame_transform = final_;
+            const glm::mat4 final_ = parent_transform * bone_transform;
+            node.bone_transform = final_;
 
             if (node.bone)
             {
                 const std::size_t bone_index = node.bone->_bone_index;
                 assert(bone_index < _transforms.size()
                     && "Too many bones. See kMaxBonesCount limit.");
-                _transforms[bone_index] = final_ * node.bone->_mesh_space_to_local;
+                _transforms[bone_index] = final_ * node.bone->_local_space_to_bone;
             }
         }
     }
@@ -355,7 +355,7 @@ struct BoneMeshInfo
     BoneIndex index = -1;
     // Inverse-bind matrix or inverse bind pose matrix or "offset" matrix:
     // https://stackoverflow.com/questions/50143649/what-does-moffsetmatrix-actually-do-in-assimp.
-    glm::mat4 bone_to_model;
+    glm::mat4 local_space_to_mesh;
 };
 
 // Helper to remap bones with string names to indexes to array.
@@ -550,7 +550,7 @@ static BoneKeyFrames Assimp_LoadBoneKeyFrames(const aiNodeAnim& channel, const B
 {
     BoneKeyFrames bone;
     bone._bone_index = bone_info.index;
-    bone._mesh_space_to_local = bone_info.bone_to_model;
+    bone._local_space_to_bone = bone_info.local_space_to_mesh;
 
     bone._positions.reserve(channel.mNumPositionKeys);
     for (unsigned index = 0; index < channel.mNumPositionKeys; ++index)
@@ -606,7 +606,7 @@ static Animation Assimp_LoadAnimation(const aiScene& scene, const BoneInfoRemap&
 
         AnimNode node;
         node.parent = data.parent;
-        node.bone_transform = Matrix_RowToColumn(data.src->mTransformation);
+        node.node_transform = Matrix_RowToColumn(data.src->mTransformation);
         assert(node.parent < int(nodes.size()));
         nodes.push_back(node);
         node_names.push_back(&data.src->mName);
