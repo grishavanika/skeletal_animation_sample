@@ -929,6 +929,7 @@ uniform mat4 bone_transforms[100];
 
 out vec2 v_UV;
 out vec3 v_Position;
+out vec3 v_Normal;
 out mat3 v_TBN;
 
 void main()
@@ -941,22 +942,21 @@ void main()
             S += (bone_transforms[in_BoneIds[i]] * in_Weights[i]);
         }
     }
-    // Hope I didn't mess up with spaces and transforms.
-    mat3 S_ = transpose(inverse(mat3(S)));
-    mat4 MVP = projection * view * model;
-    mat4 M_ = transpose(inverse(model));
 
+    mat4 MVP = projection * view * model;
     gl_Position = MVP * S * vec4(in_Position, 1.f);
+    v_Position = vec3(model * S * vec4(in_Position, 1.f));
     v_UV = in_UV;
-    v_Position = vec3(M_ * vec4(in_Position, 1.f));
     
-    mat3 MS_ = mat3(M_) * S_;
-    vec3 T = normalize(MS_ * in_Tangent);
-    vec3 B = normalize(MS_ * in_Bitangent);
-    vec3 N = normalize(MS_ * in_Normal);
+    mat3 MS = mat3(model * S);
+    vec3 T = normalize(MS * in_Tangent);
+    vec3 B = normalize(MS * in_Bitangent);
+    vec3 N = normalize(MS * in_Normal);
     v_TBN = mat3(T, B, N);
+    v_Normal = N;
 }
 )";
+
         const char* fragment_shader = R"(
 #version 330 core
 
@@ -967,6 +967,7 @@ uniform vec3 view_position;
 
 in vec2 v_UV;
 in vec3 v_Position;
+in vec3 v_Normal;
 in mat3 v_TBN;
 
 out vec4 _Color;
@@ -975,8 +976,8 @@ void main()
 {
     vec3 light_color = vec3(1.f, 1.f, 1.f);
     float abbient_K = 0.6f;
-    float specular_K = 0.9f;
-    float specular_P = 32f;
+    float specular_K = 1.2f;
+    float specular_P = 100f;
 
     // Ambient.
     vec3 ambient = abbient_K * light_color;
