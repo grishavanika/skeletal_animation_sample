@@ -24,6 +24,7 @@
 #include <stack>
 #include <string>
 #include <string_view>
+#include <span>
 #include <vector>
 #include <optional>
 #include <iterator>
@@ -75,7 +76,7 @@ struct BoneKeyFrames
 {
     // Constant run-time data.
     BoneIndex _bone_index = -1;
-    glm::mat4 _bone_to_model = glm::mat4(1.f);
+    glm::mat4 _mesh_space_to_local = glm::mat4(1.f);
     std::vector<KeyPosition> _positions;
     std::vector<KeyRotation> _rotations;
     std::vector<KeyScale> _scales;
@@ -87,7 +88,7 @@ struct BoneKeyFrames
     int _prev_rotation_index = -1;
     int _prev_scale_index = -1;
 
-    glm::mat4 update(float animation_time)
+    glm::mat4 interpolate_frames_at(float animation_time)
     {
         const glm::mat4 translation = interpolate_position(animation_time);
         const glm::mat4 rotation = interpolate_rotation(animation_time);
@@ -251,13 +252,15 @@ public:
     // Limit from Vertex shader.
     static constexpr std::size_t kMaxBonesCount = 100;
 
-    explicit Animation(std::vector<AnimNode>&& nodes, float duration, float ticks_per_second)
+    explicit Animation(std::vector<AnimNode>&& nodes, unsigned bones_count, float duration, float ticks_per_second)
         : _transforms(kMaxBonesCount, glm::mat4(1.0f))
         , _nodes(std::move(nodes))
+        , _bones_count(bones_count)
         , _current_time(0.f)
         , _duration(duration)
         , _ticks_per_second(ticks_per_second)
     {
+        assert(bones_count <= kMaxBonesCount);
     }
 
     void update(float dt)
@@ -271,32 +274,33 @@ public:
             assert(int(i) > node.parent);
 
             const glm::mat4 node_transform = node.bone
-                ? node.bone->update(_current_time)
+                ? node.bone->interpolate_frames_at(_current_time)
                 : node.bone_transform;
             const glm::mat4 parent_transform = (node.parent >= 0)
                 ? _nodes[node.parent].frame_transform
                 : glm::mat4(1.0f);
-            const glm::mat4 global_transformation = parent_transform * node_transform;
-            node.frame_transform = global_transformation;
+            const glm::mat4 final_ = parent_transform * node_transform;
+            node.frame_transform = final_;
 
             if (node.bone)
             {
                 const std::size_t bone_index = node.bone->_bone_index;
                 assert(bone_index < _transforms.size()
                     && "Too many bones. See kMaxBonesCount limit.");
-                _transforms[bone_index] = global_transformation * node.bone->_bone_to_model;
+                _transforms[bone_index] = final_ * node.bone->_mesh_space_to_local;
             }
         }
     }
 
-    const std::vector<glm::mat4>& transforms() const
+    std::span<const glm::mat4> transforms() const
     { 
-        return _transforms;
+        return std::span<const glm::mat4>(_transforms.cbegin(), _bones_count);
     }
 
 private:
     std::vector<glm::mat4> _transforms;
     std::vector<AnimNode> _nodes;
+    unsigned _bones_count;
     float _current_time;
     float _duration;
     float _ticks_per_second;
@@ -546,7 +550,7 @@ static BoneKeyFrames Assimp_LoadBoneKeyFrames(const aiNodeAnim& channel, const B
 {
     BoneKeyFrames bone;
     bone._bone_index = bone_info.index;
-    bone._bone_to_model = bone_info.bone_to_model;
+    bone._mesh_space_to_local = bone_info.bone_to_model;
 
     bone._positions.reserve(channel.mNumPositionKeys);
     for (unsigned index = 0; index < channel.mNumPositionKeys; ++index)
@@ -633,7 +637,8 @@ static Animation Assimp_LoadAnimation(const aiScene& scene, const BoneInfoRemap&
         node.bone.emplace(Assimp_LoadBoneKeyFrames(*channel, *_bone_info));
     }
 
-    return Animation(std::move(nodes), duration, ticks_per_second);
+    const unsigned bones_count = unsigned(bone_info._name_to_info.size());
+    return Animation(std::move(nodes), bones_count, duration, ticks_per_second);
 }
 
 ///////////////////////////////////////////////////////////////////////////////
@@ -893,7 +898,7 @@ private:
 
 struct RenderModel
 {
-    static RenderModel Make_NoLighting(std::vector<RenderMesh>&& meshes)
+    static RenderModel Make_SimpleNormalMapping(std::vector<RenderMesh>&& meshes)
     {
         const char* vertex_shader = R"(
 #version 330 core
@@ -1010,14 +1015,15 @@ void main()
         return model;
     }
 
-    void draw(const std::vector<glm::mat4>& transforms
+    void draw(std::span<const glm::mat4> transforms
         , glm::mat4 projection
         , glm::mat4 view
         , glm::mat4 model
         , glm::vec3 light_position
         , glm::vec3 view_position)
     {
-        assert(Animation::kMaxBonesCount == transforms.size());
+        assert(transforms.size() > 0);
+        assert(transforms.size() <= Animation::kMaxBonesCount);
         glUseProgram(_shader._id);
         glUniformMatrix4fv(_projection_ptr, 1, GL_FALSE, glm::value_ptr(projection));
         glUniformMatrix4fv(_view_ptr, 1, GL_FALSE, glm::value_ptr(view));
@@ -1104,7 +1110,7 @@ static AssimpOpenGL_Model AssimpOpenGL_LoadAnimatedMode(const std::filesystem::p
     Animation animation = Assimp_LoadAnimation(*scene, bone_info);
     // Load only diffuse textures, since nothing else is used.
     auto meshes = OpenGL_ToRenderMesh(std::move(anim_meshes), {TextureType::Diffuse, TextureType::Normal});
-    return AssimpOpenGL_Model{RenderModel::Make_NoLighting(std::move(meshes)), std::move(animation)};
+    return AssimpOpenGL_Model{RenderModel::Make_SimpleNormalMapping(std::move(meshes)), std::move(animation)};
 }
 
 ///////////////////////////////////////////////////////////////////////////////
@@ -1248,6 +1254,7 @@ int main(int argc, char* argv[])
     glfwWindowHint(GLFW_CONTEXT_VERSION_MAJOR, 3);
     glfwWindowHint(GLFW_CONTEXT_VERSION_MINOR, 3);
     glfwWindowHint(GLFW_OPENGL_PROFILE, GLFW_OPENGL_CORE_PROFILE);
+    glfwWindowHint(GLFW_SAMPLES, 4);
 
     AppState app;
     GLFWwindow* window = glfwCreateWindow(app.screen_width, app.screen_height, "App", nullptr, nullptr);
@@ -1258,9 +1265,11 @@ int main(int argc, char* argv[])
     glfwSetCursorPosCallback(window, OnMouseMove);
     glfwSetScrollCallback(window, OnMouseScroll);
     glfwSetInputMode(window, GLFW_CURSOR, GLFW_CURSOR_DISABLED);
-    assert(gladLoadGL());
+    const int glad_ok = gladLoadGL();
+    assert(glad_ok > 0);
 
     glEnable(GL_DEPTH_TEST);
+    glEnable(GL_MULTISAMPLE);
 #if (0)
     glPolygonMode(GL_FRONT_AND_BACK, GL_LINE);
 #endif
