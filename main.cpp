@@ -37,6 +37,7 @@
 #include <charconv>
 
 #include <cmath>
+#include <cstdio>
 
 #if defined(NDEBUG)
 #  undef NDEBUG
@@ -257,6 +258,11 @@ public:
     // Limit from Vertex shader.
     static constexpr std::size_t kMaxBonesCount = 100;
 
+    // Not actually needed. For debug purpose & simplicity.
+    explicit Animation()
+        : Animation(glm::mat4(1.f), {}, 0, 0.f, 0.f)
+    {
+    }
     explicit Animation(glm::mat4 root_inverse, std::vector<AnimNode>&& nodes, unsigned bones_count, float duration, float ticks_per_second)
         : _global_inverse(root_inverse)
         , _transforms(kMaxBonesCount, glm::mat4(1.0f))
@@ -300,8 +306,15 @@ public:
     }
 
     std::span<const glm::mat4> transforms() const
-    { 
-        return std::span<const glm::mat4>(_transforms.cbegin(), _bones_count);
+    {
+        if (_bones_count > 0)
+        {
+            // Valid animation. Return what was updated.
+            return std::span<const glm::mat4>(_transforms.cbegin(), _bones_count);
+        }
+        // For debug purpose.
+        // Not valid animation data. Return identity transforms we have.
+        return _transforms;
     }
 
 private:
@@ -347,7 +360,7 @@ enum class TextureType
 struct AnimTexture
 {
     std::filesystem::path file_path;
-    TextureType type = TextureType::Diffuse;
+    TextureType type = TextureType::Invalid;
 };
 
 struct AnimMesh
@@ -592,6 +605,11 @@ static BoneKeyFrames Assimp_LoadBoneKeyFrames(const aiNodeAnim& channel, const B
 
 static Animation Assimp_LoadAnimation(const aiScene& scene, const BoneInfoRemap& bone_info)
 {
+    if (scene.mNumAnimations == 0)
+    {
+        std::fprintf(stderr, "Assimp scene does not have animations. Loading invalid one (no-op).\n");
+        return Animation();
+    }
     assert(scene.mNumAnimations == 1);
     const aiAnimation* const animation = scene.mAnimations[0];
     const float duration = float(animation->mDuration);
@@ -654,8 +672,10 @@ static Animation Assimp_LoadAnimation(const aiScene& scene, const BoneInfoRemap&
 // RENDER.
 struct RenderTexture
 {
-    unsigned texture_name;
-    TextureType type;
+    bool _loaded = false;
+    unsigned texture_name = 0;
+    TextureType type = TextureType::Invalid;
+    explicit RenderTexture() = default;
 
     static RenderTexture FromMemory(TextureType type, GLenum format, int width, int height, const void* data)
     {
@@ -670,40 +690,63 @@ struct RenderTexture
         glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
         return RenderTexture(texture_name, type);
     }
+    static RenderTexture Invalid_White()
+    {
+        unsigned data = 0xffffffff;
+        return RenderTexture::FromMemory(TextureType::Invalid, GL_RGB, 1, 1, &data);
+    }
     ~RenderTexture() noexcept
     {
-        if (std::exchange(type, TextureType::Invalid) != TextureType::Invalid)
+        if (std::exchange(_loaded, false))
         {
             glDeleteTextures(1, &texture_name);
-            texture_name = 0;
         }
     }
     RenderTexture(RenderTexture&& rhs) noexcept
-        : texture_name(std::exchange(rhs.texture_name, 0))
+        : _loaded(std::exchange(rhs._loaded, false))
+        , texture_name(std::exchange(rhs.texture_name, 0))
         , type(std::exchange(rhs.type, TextureType::Invalid)) { }
     RenderTexture& operator=(RenderTexture&&) = delete;
     RenderTexture(const RenderTexture&) = delete;
     RenderTexture& operator=(const RenderTexture&) = delete;
 private:
     explicit RenderTexture(unsigned name, TextureType type)
-        : texture_name(name), type(type)
+        : _loaded(true), texture_name(name), type(type)
     {
-        assert(type != TextureType::Invalid);
     }
 };
 
-struct TextureLocation
+using TextureHandle = int;
+
+struct TexturesDB
 {
-    int texture_unit = -1;
-    int location = -1;
+    RenderTexture _invalid = RenderTexture::Invalid_White();
+    std::vector<RenderTexture> _textures;
+
+    TextureHandle add(RenderTexture&& texture)
+    {
+        _textures.push_back(std::move(texture));
+        return TextureHandle(_textures.size() - 1);
+    }
+
+    unsigned get(TextureHandle handle) const
+    {
+        if ((handle < 0) || (handle >= int(_textures.size())))
+        {
+            return _invalid.texture_name;
+        }
+        return _textures[std::size_t(handle)].texture_name;
+    }
 };
 
 class RenderMesh
 {
 public:
-    static RenderMesh FromMemory(std::vector<AnimVertex>&& vertices
+    static RenderMesh FromMemory(
+          std::vector<AnimVertex>&& vertices
         , std::vector<unsigned>&& indices
-        , std::vector<RenderTexture>&& textures)
+        , TextureHandle diffuse
+        , TextureHandle normal)
     {
         assert(vertices.size() > 0);
         assert(indices.size() > 0);
@@ -749,9 +792,7 @@ public:
         glBindVertexArray(0);
 
         return RenderMesh(VAO, VBO, EBO
-            , indices.size()
-            , GetTexture(textures, TextureType::Diffuse)
-            , GetTexture(textures, TextureType::Normal));
+            , indices.size(), diffuse, normal);
     }
 
     RenderMesh(const RenderMesh&) = delete;
@@ -776,46 +817,36 @@ public:
         }
     }
 
-    static RenderTexture GetTexture(std::vector<RenderTexture>& textures, TextureType type)
+    void draw(TexturesDB& textures, int diffuse_ptr, int normal_ptr)
     {
-        auto it = std::find_if(textures.begin(), textures.end()
-            , [&](const RenderTexture& t)
-        {
-            return t.type == type;
-        });
-        assert(it != textures.end() && "No diffuse texture found.");
-        return std::move(*it);
-    }
+        glActiveTexture(GL_TEXTURE0);
+        glUniform1i(diffuse_ptr, 0);
+        glBindTexture(GL_TEXTURE_2D, textures.get(_diffuse));
+        glActiveTexture(GL_TEXTURE1);
+        glUniform1i(normal_ptr, 1);
+        glBindTexture(GL_TEXTURE_2D, textures.get(_normal));
 
-    void draw(TextureLocation diffuse, TextureLocation normal)
-    {
         glBindVertexArray(_VAO);
-        glActiveTexture(GL_TEXTURE0 + diffuse.texture_unit);
-        glUniform1i(diffuse.location, _diffuse.texture_name);
-        glBindTexture(GL_TEXTURE_2D, _diffuse.texture_name);
-        glActiveTexture(GL_TEXTURE0 + normal.texture_unit);
-        glUniform1i(normal.location, _normal.texture_name);
-        glBindTexture(GL_TEXTURE_2D, _normal.texture_name);
         glDrawElements(GL_TRIANGLES, GLsizei(_indicies_count), GL_UNSIGNED_INT, 0);
     }
 
 private:
     explicit RenderMesh(unsigned VAO, unsigned VBO, unsigned EBO
-        , std::size_t indicies_count, RenderTexture&& diffuse, RenderTexture&& normal)
+        , std::size_t indicies_count, TextureHandle diffuse, TextureHandle normal)
         : _VAO(VAO)
         , _VBO(VBO)
         , _EBO(EBO)
         , _indicies_count(indicies_count)
-        , _diffuse(std::move(diffuse))
-        , _normal(std::move(normal))
+        , _diffuse(diffuse)
+        , _normal(normal)
     {
     }
     unsigned _VAO;
     unsigned _VBO;
     unsigned _EBO;
     std::size_t _indicies_count;
-    RenderTexture _diffuse;
-    RenderTexture _normal;
+    TextureHandle _diffuse;
+    TextureHandle _normal;
 };
 
 static RenderTexture OpenGL_LoadTexture(const AnimTexture& raw_texture)
@@ -907,7 +938,7 @@ private:
 
 struct RenderModel
 {
-    static RenderModel Make_SimpleNormalMapping(std::vector<RenderMesh>&& meshes)
+    static RenderModel Make_SimpleNormalMapping(TexturesDB&& textures, std::vector<RenderMesh>&& meshes)
     {
         const char* vertex_shader = R"(
 #version 330 core
@@ -942,7 +973,12 @@ void main()
             S += (bone_transforms[in_BoneIds[i]] * in_Weights[i]);
         }
     }
-
+    if (in_BoneIds[0] < 0)
+    {
+        // In case vertex has no any bone.
+        // For debug purpose, make it visible.
+        S = mat4(1.f);
+    }
     mat4 MVP = projection * view * model;
     gl_Position = MVP * S * vec4(in_Position, 1.f);
     v_Position = vec3(model * S * vec4(in_Position, 1.f));
@@ -1002,23 +1038,21 @@ void main()
     _Color = vec4(color, 1.f);
 }
 )";
-
-        RenderModel model(OpenGL_ShaderProgram::FromBuffers(vertex_shader, fragment_shader));
+        auto shader = OpenGL_ShaderProgram::FromBuffers(vertex_shader, fragment_shader);
+        RenderModel model(std::move(textures), std::move(shader));
         model._meshes = std::move(meshes);
         const unsigned shader_hanle = model._shader._id;
         glUseProgram(shader_hanle);
-        model._diffuse.texture_unit = 1;
-        model._diffuse.location = glGetUniformLocation(shader_hanle, "diffuse_sampler");
-        model._normal.texture_unit = 2;
-        model._normal.location = glGetUniformLocation(shader_hanle, "normal_sampler");
+        model._diffuse_ptr = glGetUniformLocation(shader_hanle, "diffuse_sampler");
+        model._normal_ptr = glGetUniformLocation(shader_hanle, "normal_sampler");
         model._projection_ptr = glGetUniformLocation(shader_hanle, "projection");
         model._view_ptr = glGetUniformLocation(shader_hanle, "view");
         model._model_ptr = glGetUniformLocation(shader_hanle, "model");
         model._transforms_ptr = glGetUniformLocation(shader_hanle, "bone_transforms");
         model._light_position_ptr = glGetUniformLocation(shader_hanle, "light_position");
         model._view_position_ptr = glGetUniformLocation(shader_hanle, "view_position");
-        assert(model._diffuse.location >= 0);
-        assert(model._normal.location >= 0);
+        assert(model._diffuse_ptr >= 0);
+        assert(model._normal_ptr >= 0);
         assert(model._projection_ptr >= 0);
         assert(model._view_ptr >= 0);
         assert(model._model_ptr >= 0);
@@ -1047,20 +1081,22 @@ void main()
 
         for (RenderMesh& mesh : _meshes)
         {
-            mesh.draw(_diffuse, _normal);
+            mesh.draw(_textures, _diffuse_ptr, _normal_ptr);
         }
     }
 
 private:
-    explicit RenderModel(OpenGL_ShaderProgram&& shader)
-        : _shader(std::move(shader))
+    explicit RenderModel(TexturesDB&& textures, OpenGL_ShaderProgram&& shader)
+        : _textures(std::move(textures))
+        , _shader(std::move(shader))
     {
     }
 
+    TexturesDB _textures;
     OpenGL_ShaderProgram _shader;
     std::vector<RenderMesh> _meshes;
-    TextureLocation _diffuse;
-    TextureLocation _normal;
+    int _diffuse_ptr = -1;
+    int _normal_ptr = -1;
     int _projection_ptr = -1;
     int _view_ptr = -1;
     int _model_ptr = -1;
@@ -1069,31 +1105,32 @@ private:
     int _view_position_ptr = -1;
 };
 
-static std::vector<RenderMesh> OpenGL_ToRenderMesh(std::vector<AnimMesh>&& anim_meshes
-    , std::initializer_list<TextureType> load_textures)
+static std::vector<RenderMesh> OpenGL_LoadRenderMesh(TexturesDB& textures
+    , std::vector<AnimMesh>&& anim_meshes)
 {
-    auto get_by_type = [](AnimMesh& mesh, TextureType type) -> const AnimTexture&
+    auto load_by_type = [&](AnimMesh& mesh, TextureType type, const char* debug_name)
     {
         auto it = std::find_if(mesh.textures.begin(), mesh.textures.end()
             , [&](const AnimTexture& t)
         {
             return (t.type == type);
         });
-        assert(it != mesh.textures.end() && "Required texture was not found.");
-        return *it;
+        if (it != mesh.textures.end())
+        {
+            return textures.add(OpenGL_LoadTexture(*it));
+        }
+        std::fprintf(stderr, "Mesh is missing '%s' texture.\n", debug_name);
+        return TextureHandle(-1);
     };
 
     std::vector<RenderMesh> meshes;
     for (AnimMesh& anim_mesh : anim_meshes)
     {
-        std::vector<RenderTexture> textures;
-        for (TextureType required : load_textures)
-        {
-            const AnimTexture t = get_by_type(anim_mesh, required);
-            textures.push_back(OpenGL_LoadTexture(t));
-        }
-        meshes.push_back(RenderMesh::FromMemory(std::move(anim_mesh.vertices)
-            , std::move(anim_mesh.indices), std::move(textures)));
+        meshes.push_back(RenderMesh::FromMemory(
+              std::move(anim_mesh.vertices)
+            , std::move(anim_mesh.indices)
+            , load_by_type(anim_mesh, TextureType::Diffuse, "diffuse")
+            , load_by_type(anim_mesh, TextureType::Normal, "normal")));
     }
     return meshes;
 }
@@ -1119,11 +1156,16 @@ static AssimpOpenGL_Model AssimpOpenGL_LoadAnimatedMode(const std::filesystem::p
     assert(scene->mRootNode);
 
     BoneInfoRemap bone_info;
-    std::vector<AnimMesh> anim_meshes = Assimp_LoadModelMeshWithAnimationsWeights(model_path, *scene, bone_info);
-    Animation animation = Assimp_LoadAnimation(*scene, bone_info);
-    // Load only diffuse textures, since nothing else is used.
-    auto meshes = OpenGL_ToRenderMesh(std::move(anim_meshes), {TextureType::Diffuse, TextureType::Normal});
-    return AssimpOpenGL_Model{RenderModel::Make_SimpleNormalMapping(std::move(meshes)), std::move(animation)};
+    TexturesDB textures;
+    std::vector<AnimMesh> anim_meshes =
+        Assimp_LoadModelMeshWithAnimationsWeights(model_path, *scene, bone_info);
+    Animation animation =
+        Assimp_LoadAnimation(*scene, bone_info);
+    std::vector<RenderMesh> meshes =
+        OpenGL_LoadRenderMesh(textures, std::move(anim_meshes));
+    RenderModel model = 
+        RenderModel::Make_SimpleNormalMapping(std::move(textures), std::move(meshes));
+    return AssimpOpenGL_Model{std::move(model), std::move(animation)};
 }
 
 ///////////////////////////////////////////////////////////////////////////////
@@ -1298,8 +1340,11 @@ static float Get_ArgFloat(int argc, char* argv[], const char* name, float or_def
 int main(int argc, char* argv[])
 {
     assert(argc >= 2 && "app.exe <path to model to load>");
+    const char* const path = argv[1];
     // Models from mixamo.com are HUGE, make them smaller.
     const float model_scale = Get_ArgFloat(argc, argv, "--scale", 0.012f);
+    std::fprintf(stdout, "Model to load: %s.\n", path);
+    std::fprintf(stdout, "Model scale: %f.\n", model_scale);
 
     glfwInit();
     glfwWindowHint(GLFW_CONTEXT_VERSION_MAJOR, 3);
@@ -1326,7 +1371,6 @@ int main(int argc, char* argv[])
     glPolygonMode(GL_FRONT_AND_BACK, GL_LINE);
 #endif
 
-    const char* const path = argv[1];
     auto [render_model, animation] = AssimpOpenGL_LoadAnimatedMode(path);
 
     app.camera.force_refresh();
