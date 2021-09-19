@@ -1353,7 +1353,7 @@ int main(int argc, char* argv[])
             , 0.1f     // Near.
             , 100.0f); // Far.
         const glm::mat4 view = app.camera.view_matrix();
-        glm::mat4 model = model = glm::scale(glm::mat4(1.0f), glm::vec3(model_scale));
+        glm::mat4 model = glm::scale(glm::mat4(1.0f), glm::vec3(model_scale));
 
         glClearColor(0.f, 0.f, 0.f, 1.f);
         glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
