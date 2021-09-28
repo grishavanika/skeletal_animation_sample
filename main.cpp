@@ -603,15 +603,24 @@ static BoneKeyFrames Assimp_LoadBoneKeyFrames(const aiNodeAnim& channel, const B
     return bone;
 }
 
-static Animation Assimp_LoadAnimation(const aiScene& scene, const BoneInfoRemap& bone_info)
+static Animation Assimp_LoadAnimation(const aiScene& scene
+    , int animation_index // -1 - load first one by default
+    , const BoneInfoRemap& bone_info)
 {
     if (scene.mNumAnimations == 0)
     {
         std::fprintf(stderr, "Assimp scene does not have animations. Loading invalid one (no-op).\n");
         return Animation();
     }
-    assert(scene.mNumAnimations == 1);
-    const aiAnimation* const animation = scene.mAnimations[0];
+    if ((scene.mNumAnimations > 1) && (animation_index < 0))
+    {
+        std::fprintf(stderr, "There are %u animations available."
+            " Use '--animation N' to load animation with index N (0-based).\n"
+            , scene.mNumAnimations);
+    }
+    animation_index = std::max(0, animation_index); // Try to load first one, if nothing specified.
+    assert(unsigned(animation_index) < scene.mNumAnimations);
+    const aiAnimation* const animation = scene.mAnimations[animation_index];
     const float duration = float(animation->mDuration);
     const float ticks_per_second = float(animation->mTicksPerSecond);
     std::vector<AnimNode> nodes;
@@ -742,6 +751,10 @@ struct TexturesDB
 class RenderMesh
 {
 public:
+    TextureHandle _diffuse;
+    TextureHandle _normal;
+
+public:
     static RenderMesh FromMemory(
           std::vector<AnimVertex>&& vertices
         , std::vector<unsigned>&& indices
@@ -817,7 +830,8 @@ public:
         }
     }
 
-    void draw(TexturesDB& textures, int diffuse_ptr, int normal_ptr)
+    void draw(TexturesDB& textures, int diffuse_ptr, int normal_ptr
+        , int debug_flags_ptr)
     {
         glActiveTexture(GL_TEXTURE0);
         glUniform1i(diffuse_ptr, 0);
@@ -825,6 +839,13 @@ public:
         glActiveTexture(GL_TEXTURE1);
         glUniform1i(normal_ptr, 1);
         glBindTexture(GL_TEXTURE_2D, textures.get(_normal));
+
+        glm::vec3 debug_flags(0.f);
+        if (_normal < 0)
+        {
+            debug_flags.x = 1; // Missing normal texture. Use per-vertex Normals.
+         }
+        glUniform3fv(debug_flags_ptr, 1, glm::value_ptr(debug_flags));
 
         glBindVertexArray(_VAO);
         glDrawElements(GL_TRIANGLES, GLsizei(_indicies_count), GL_UNSIGNED_INT, 0);
@@ -845,8 +866,6 @@ private:
     unsigned _VBO;
     unsigned _EBO;
     std::size_t _indicies_count;
-    TextureHandle _diffuse;
-    TextureHandle _normal;
 };
 
 static RenderTexture OpenGL_LoadTexture(const AnimTexture& raw_texture)
@@ -1001,6 +1020,11 @@ uniform sampler2D normal_sampler;
 uniform vec3 light_position;
 uniform vec3 view_position;
 
+// Debug_Flags.x: 1 if need to use per-vertex Normals (v_Normal).
+// Debug_Flags.y: unused.
+// Debug_Flags.z: unused.
+uniform vec3 Debug_Flags;
+
 in vec2 v_UV;
 in vec3 v_Position;
 in vec3 v_Normal;
@@ -1023,6 +1047,11 @@ void main()
     N = N * 2.0 - 1.0;
     N = normalize(v_TBN * N);
 
+    if (Debug_Flags.x > 0)
+    {
+        N = normalize(v_Normal);
+    }
+
     vec3 light_dir = normalize(light_position - v_Position);
     float diff = max(dot(N, light_dir), 0.f);
     vec3 diffuse = diff * light_color;
@@ -1041,16 +1070,17 @@ void main()
         auto shader = OpenGL_ShaderProgram::FromBuffers(vertex_shader, fragment_shader);
         RenderModel model(std::move(textures), std::move(shader));
         model._meshes = std::move(meshes);
-        const unsigned shader_hanle = model._shader._id;
-        glUseProgram(shader_hanle);
-        model._diffuse_ptr = glGetUniformLocation(shader_hanle, "diffuse_sampler");
-        model._normal_ptr = glGetUniformLocation(shader_hanle, "normal_sampler");
-        model._projection_ptr = glGetUniformLocation(shader_hanle, "projection");
-        model._view_ptr = glGetUniformLocation(shader_hanle, "view");
-        model._model_ptr = glGetUniformLocation(shader_hanle, "model");
-        model._transforms_ptr = glGetUniformLocation(shader_hanle, "bone_transforms");
-        model._light_position_ptr = glGetUniformLocation(shader_hanle, "light_position");
-        model._view_position_ptr = glGetUniformLocation(shader_hanle, "view_position");
+        const unsigned shader_handle = model._shader._id;
+        glUseProgram(shader_handle);
+        model._diffuse_ptr = glGetUniformLocation(shader_handle, "diffuse_sampler");
+        model._normal_ptr = glGetUniformLocation(shader_handle, "normal_sampler");
+        model._projection_ptr = glGetUniformLocation(shader_handle, "projection");
+        model._view_ptr = glGetUniformLocation(shader_handle, "view");
+        model._model_ptr = glGetUniformLocation(shader_handle, "model");
+        model._transforms_ptr = glGetUniformLocation(shader_handle, "bone_transforms");
+        model._light_position_ptr = glGetUniformLocation(shader_handle, "light_position");
+        model._view_position_ptr = glGetUniformLocation(shader_handle, "view_position");
+        model._debug_flags_ptr = glGetUniformLocation(shader_handle, "Debug_Flags");
         assert(model._diffuse_ptr >= 0);
         assert(model._normal_ptr >= 0);
         assert(model._projection_ptr >= 0);
@@ -1059,6 +1089,7 @@ void main()
         assert(model._transforms_ptr >= 0);
         assert(model._light_position_ptr >= 0);
         assert(model._view_position_ptr >= 0);
+        assert(model._debug_flags_ptr >= 0);
         return model;
     }
 
@@ -1081,7 +1112,7 @@ void main()
 
         for (RenderMesh& mesh : _meshes)
         {
-            mesh.draw(_textures, _diffuse_ptr, _normal_ptr);
+            mesh.draw(_textures, _diffuse_ptr, _normal_ptr, _debug_flags_ptr);
         }
     }
 
@@ -1103,12 +1134,13 @@ private:
     int _transforms_ptr = -1;
     int _light_position_ptr = -1;
     int _view_position_ptr = -1;
+    int _debug_flags_ptr = -1;
 };
 
 static std::vector<RenderMesh> OpenGL_LoadRenderMesh(TexturesDB& textures
     , std::vector<AnimMesh>&& anim_meshes)
 {
-    auto load_by_type = [&](AnimMesh& mesh, TextureType type, const char* debug_name)
+    auto load_by_type = [&](AnimMesh& mesh, TextureType type)
     {
         auto it = std::find_if(mesh.textures.begin(), mesh.textures.end()
             , [&](const AnimTexture& t)
@@ -1119,7 +1151,6 @@ static std::vector<RenderMesh> OpenGL_LoadRenderMesh(TexturesDB& textures
         {
             return textures.add(OpenGL_LoadTexture(*it));
         }
-        std::fprintf(stderr, "Mesh is missing '%s' texture.\n", debug_name);
         return TextureHandle(-1);
     };
 
@@ -1129,8 +1160,8 @@ static std::vector<RenderMesh> OpenGL_LoadRenderMesh(TexturesDB& textures
         meshes.push_back(RenderMesh::FromMemory(
               std::move(anim_mesh.vertices)
             , std::move(anim_mesh.indices)
-            , load_by_type(anim_mesh, TextureType::Diffuse, "diffuse")
-            , load_by_type(anim_mesh, TextureType::Normal, "normal")));
+            , load_by_type(anim_mesh, TextureType::Diffuse)
+            , load_by_type(anim_mesh, TextureType::Normal)));
     }
     return meshes;
 }
@@ -1141,7 +1172,47 @@ struct AssimpOpenGL_Model
     Animation animation;
 };
 
-static AssimpOpenGL_Model AssimpOpenGL_LoadAnimatedMode(const std::filesystem::path& model_path)
+static void HandleMissingTexturesIfAny(
+    TexturesDB& textures
+    , std::vector<RenderMesh>& meshes
+    , const char* add_diffuse_texture)
+{
+    const bool has_missing_diffuse = std::any_of(meshes.cbegin(), meshes.cend()
+        , [](const RenderMesh& m) { return (m._diffuse < 0); });
+    if (has_missing_diffuse && !add_diffuse_texture)
+    {
+        std::fprintf(stderr, "Some Model's meshes are missing diffuse texture."
+            " Use '--diffuse <file>' to load file as diffuse texture for all"
+            " such meshes.\n");
+    }
+
+    if (has_missing_diffuse && add_diffuse_texture)
+    {
+        assert(std::filesystem::exists(add_diffuse_texture));
+        const TextureHandle handle = textures.add(OpenGL_LoadTexture(
+            AnimTexture{.file_path = add_diffuse_texture, .type = TextureType::Diffuse}));
+        for (RenderMesh& m : meshes)
+        {
+            if (m._diffuse < 0)
+            {
+                m._diffuse = handle;
+            }
+        }
+    }
+
+    const bool has_missing_normals = std::any_of(meshes.cbegin(), meshes.cend()
+        , [](const RenderMesh& m) { return (m._normal < 0); });
+    if (has_missing_normals)
+    {
+        std::fprintf(stderr, "Some Model's meshes are missing normals texture."
+            " Using per-vertex Normals.\n");
+    }
+}
+
+static AssimpOpenGL_Model AssimpOpenGL_LoadAnimatedModel(
+    const std::filesystem::path& model_path
+    , int animation_index = -1 // first, by default
+    , const char* add_diffuse_texture = nullptr)
 {
     Assimp::Importer importer;
     // As per AnimVertex.
@@ -1160,9 +1231,10 @@ static AssimpOpenGL_Model AssimpOpenGL_LoadAnimatedMode(const std::filesystem::p
     std::vector<AnimMesh> anim_meshes =
         Assimp_LoadModelMeshWithAnimationsWeights(model_path, *scene, bone_info);
     Animation animation =
-        Assimp_LoadAnimation(*scene, bone_info);
+        Assimp_LoadAnimation(*scene, animation_index, bone_info);
     std::vector<RenderMesh> meshes =
         OpenGL_LoadRenderMesh(textures, std::move(anim_meshes));
+    HandleMissingTexturesIfAny(textures, meshes, add_diffuse_texture);
     RenderModel model = 
         RenderModel::Make_SimpleNormalMapping(std::move(textures), std::move(meshes));
     return AssimpOpenGL_Model{std::move(model), std::move(animation)};
@@ -1315,7 +1387,7 @@ static void OnKeyEvent(GLFWwindow* window, int key, int scancode, int action, in
     }
 }
 
-static float Get_ArgFloat(int argc, char* argv[], const char* name, float or_default = -1.f)
+static const char* Get_ArgStr(int argc, char* argv[], const char* name, const char* or_default = nullptr)
 {
     int index = -1;
     for (int i = 1; i < argc; ++i)
@@ -1330,8 +1402,13 @@ static float Get_ArgFloat(int argc, char* argv[], const char* name, float or_def
     {
         return or_default;
     }
+    return argv[index];
+}
+
+static float Get_ArgFloat(int argc, char* argv[], const char* name, float or_default = -1.f)
+{
     float v = or_default;
-    const char* v_str = argv[index];
+    const char* v_str = Get_ArgStr(argc, argv, name, "");
     const char* v_end = v_str + strlen(v_str);
     (void)std::from_chars(v_str, v_end, v);
     return v;
@@ -1340,11 +1417,24 @@ static float Get_ArgFloat(int argc, char* argv[], const char* name, float or_def
 int main(int argc, char* argv[])
 {
     assert(argc >= 2 && "app.exe <path to model to load>");
+    
     const char* const path = argv[1];
-    // Models from mixamo.com are HUGE, make them smaller.
     const float model_scale = Get_ArgFloat(argc, argv, "--scale", 0.012f);
+    const char* const diffuse_texture = Get_ArgStr(argc, argv, "--diffuse");
+    const int animation_index = int(Get_ArgFloat(argc, argv, "--animation", -1.f));
+    const float time_speed = Get_ArgFloat(argc, argv, "--speed", 1.f);
+
     std::fprintf(stdout, "Model to load: %s.\n", path);
     std::fprintf(stdout, "Model scale: %f.\n", model_scale);
+    std::fprintf(stdout, "Animation speed multiplier: %f.\n", time_speed);
+    if (animation_index >= 0)
+    {
+        std::fprintf(stdout, "Animation index to load: %i.\n", animation_index);
+    }
+    if (diffuse_texture)
+    {
+        std::fprintf(stdout, "Diffuse texture for meshes with missing ones: '%s'.\n", diffuse_texture);
+    }
 
     glfwInit();
     glfwWindowHint(GLFW_CONTEXT_VERSION_MAJOR, 3);
@@ -1371,7 +1461,8 @@ int main(int argc, char* argv[])
     glPolygonMode(GL_FRONT_AND_BACK, GL_LINE);
 #endif
 
-    auto [render_model, animation] = AssimpOpenGL_LoadAnimatedMode(path);
+    auto [render_model, animation] = AssimpOpenGL_LoadAnimatedModel(
+        path, animation_index, diffuse_texture);
 
     app.camera.force_refresh();
     while (!glfwWindowShouldClose(window))
@@ -1383,7 +1474,7 @@ int main(int argc, char* argv[])
 
         if (!app._pause_animation)
         {
-            animation.update(app._dt);
+            animation.update(app._dt * time_speed);
         }
 
         if (app.screen_height <= 0)
