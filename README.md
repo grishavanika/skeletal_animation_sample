@@ -8,10 +8,10 @@
 
 ```
 # Any model with format ASSIMP supports can be loaded.
-main.exe vampire/dancing_vampire.dae
+main vampire/dancing_vampire.dae
 ```
 
-`dancing_vampire.dae` can be downloaded from [LearnOpenGL github](https://github.com/JoeyDeVries/LearnOpenGL/tree/master/resources/objects/vampire).  
+`dancing_vampire.dae` can be downloaded from [LearnOpenGL github](https://github.com/JoeyDeVries/LearnOpenGL/tree/6159792dec67ff0ba70f7fd2eafd88b683730e64/resources/objects/vampire).  
 
 # How to build.
 
