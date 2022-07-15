@@ -2,12 +2,16 @@
 
 ![Peasant Girl from mixamo.com](Animation.gif)
 
+^ "Peasant Girl" from [mixamo.com](mixamo.com).
+
 # How to run.
 
 ```
-:: Any model with format ASSIMP supports can be specified.
+# Any model with format ASSIMP supports can be loaded.
 main.exe vampire/dancing_vampire.dae
 ```
+
+`dancing_vampire.dae` can be downloaded from [LearnOpenGL github](https://github.com/JoeyDeVries/LearnOpenGL/tree/master/resources/objects/vampire).  
 
 # How to build.
 

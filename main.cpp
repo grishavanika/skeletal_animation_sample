@@ -308,14 +308,11 @@ public:
 
     std::span<const glm::mat4> transforms() const
     {
-        if (_bones_count > 0)
-        {
-            // Valid animation. Return what was updated.
-            return std::span<const glm::mat4>(_transforms.cbegin(), _bones_count);
-        }
-        // For debug purpose.
-        // Not valid animation data. Return identity transforms we have.
-        return _transforms;
+        const glm::mat4* ptr = _transforms.data();
+        const std::size_t count = _bones_count > 0
+            ? std::size_t(_bones_count) // Valid animation. Return what was updated.
+            : _transforms.size(); // Debug. Return identity transforms we have.
+        return std::span<const glm::mat4>(ptr, count);
     }
 
 private:
@@ -1223,7 +1220,11 @@ static AssimpOpenGL_Model AssimpOpenGL_LoadAnimatedModel(
         | aiProcess_CalcTangentSpace
         | aiProcess_FlipUVs
         | aiProcess_LimitBoneWeights);
-    assert(scene);
+    if (!scene)
+    {
+        std::fprintf(stderr, "ASSIMP ReadFile() error. %s\n", importer.GetErrorString());
+        assert(false && "No scene. See output for more details.");
+    }
     assert((scene->mFlags & AI_SCENE_FLAGS_INCOMPLETE) == 0);
     assert(scene->mRootNode);
 
