@@ -2,7 +2,7 @@
 
 ![Peasant Girl from mixamo.com](Animation.gif)
 
-^ "Peasant Girl" from [mixamo.com](mixamo.com).
+^ "Peasant Girl" from [mixamo.com](https://www.mixamo.com).  
 
 # How to run.
 
