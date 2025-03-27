@@ -15,7 +15,6 @@
 
 #include <glm/glm.hpp>
 #include <glm/gtc/matrix_transform.hpp>
-#include <glm/gtx/quaternion.hpp>
 #include <glm/gtc/type_ptr.hpp>
 
 #define STB_IMAGE_IMPLEMENTATION
@@ -226,7 +225,7 @@ private:
         const float scale_factor = GetScaleFactor(prev.time_stamp, next.time_stamp, animation_time);
         const glm::quat rotation = glm::normalize(glm::slerp(
             prev.orientation, next.orientation, scale_factor));
-        return glm::toMat4(rotation);
+        return glm::mat4_cast(rotation);
     }
 
     glm::mat4 interpolate_scaling(float animation_time)
@@ -913,6 +912,9 @@ struct OpenGL_ShaderProgram
         {
             int success = -1;
             glGetShaderiv(fragment, GL_COMPILE_STATUS, &success);
+            // char buff[1024]{};
+            // GLsizei size = 0;
+            // glGetShaderInfoLog(fragment, 1024, &size, buff);
             assert(success != 0);
         }
 
@@ -982,7 +984,7 @@ out mat3 v_TBN;
 
 void main()
 {
-    mat4 S = mat4(0.f);
+    mat4 S = mat4(0.0f);
     for (int i = 0; i < 4; ++i)
     {
         if (in_BoneIds[i] >= 0)
@@ -994,11 +996,11 @@ void main()
     {
         // In case vertex has no any bone.
         // For debug purpose, make it visible.
-        S = mat4(1.f);
+        S = mat4(1.0f);
     }
     mat4 MVP = projection * view * model;
-    gl_Position = MVP * S * vec4(in_Position, 1.f);
-    v_Position = vec3(model * S * vec4(in_Position, 1.f));
+    gl_Position = MVP * S * vec4(in_Position, 1.0f);
+    v_Position = vec3(model * S * vec4(in_Position, 1.0f));
     v_UV = in_UV;
     
     mat3 MS = mat3(model * S);
@@ -1032,10 +1034,10 @@ out vec4 _Color;
 
 void main()
 {
-    vec3 light_color = vec3(1.f, 1.f, 1.f);
+    vec3 light_color = vec3(1.0f, 1.0f, 1.0f);
     float abbient_K = 0.6f;
     float specular_K = 1.2f;
-    float specular_P = 100f;
+    float specular_P = 100.0f;
 
     // Ambient.
     vec3 ambient = abbient_K * light_color;
@@ -1051,18 +1053,18 @@ void main()
     }
 
     vec3 light_dir = normalize(light_position - v_Position);
-    float diff = max(dot(N, light_dir), 0.f);
+    float diff = max(dot(N, light_dir), 0.0f);
     vec3 diffuse = diff * light_color;
     
     // Specular.
     vec3 view_dir = normalize(view_position - v_Position);
     vec3 reflect_dir = reflect(-light_dir, N);
-    float spec = pow(max(dot(view_dir, reflect_dir), 0.f), specular_P);
+    float spec = pow(max(dot(view_dir, reflect_dir), 0.0f), specular_P);
     vec3 specular = specular_K * spec * light_color;
     
     vec3 object_color = vec3(texture(diffuse_sampler, v_UV));
     vec3 color = (ambient + diffuse + specular) * object_color;
-    _Color = vec4(color, 1.f);
+    _Color = vec4(color, 1.0f);
 }
 )";
         auto shader = OpenGL_ShaderProgram::FromBuffers(vertex_shader, fragment_shader);
