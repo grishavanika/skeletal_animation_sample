@@ -387,10 +387,19 @@ struct BoneInfoRemap
     {
         auto [it, inserted] = _name_to_info.insert(
             std::make_pair(std::move(name), BoneMeshInfo{-1, bone_to_model}));
-        assert(inserted && "Inserting duplicated bone.");
-        BoneMeshInfo& info = it->second;
-        info.index = _next_bone_id++;
-        return info.index;
+        if (inserted)
+        {
+            BoneMeshInfo& info = it->second;
+            info.index = _next_bone_id++;
+            return info.index;
+        }
+        else
+        {
+            // This bone already exists. Transform MUST be the same.
+            const BoneMeshInfo& old_info = it->second;
+            assert(old_info.model_space_to_bone == bone_to_model);
+            return old_info.index;
+        }
     }
 
     const BoneMeshInfo* get(const char* name) const
@@ -465,6 +474,7 @@ static AnimMesh Assimp_LoadMesh(
                 AnimTexture& t = textures.back();
                 t.file_path = model_path.parent_path() / std::string(file_name.data, file_name.length);
                 t.type = type;
+                // Use scene.GetEmbeddedTexture(file_name.C_Str()).
                 assert(std::filesystem::exists(t.file_path));
             }
         }
@@ -1494,7 +1504,7 @@ int main(int argc, char* argv[])
         const glm::mat4 view = app.camera.view_matrix();
         glm::mat4 model = glm::scale(glm::mat4(1.0f), glm::vec3(model_scale));
 
-        glClearColor(0.f, 0.f, 0.f, 1.f);
+        glClearColor(0.5f, 0.5f, 0.5f, 1.f);
         glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
 
         render_model.draw(animation.transforms()

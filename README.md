@@ -2,15 +2,18 @@
 
 Example from <https://learnopengl.com/Guest-Articles/2020/Skeletal-Animation>:
 
-![](dancing_vampire.gif)
+![](Capoeira_Mannequin.gif)
 
 # How to run
 
+Use Collada format instead of FBX because the code does not support
+formats with embedded textures; expects texture files to be present on disk:
+
 ```
-main dancing_vampire.dae
+build\Release\main.exe Capoeira_Mannequin.dae
 ```
 
-`dancing_vampire.dae` comes from [LearnOpenGL github](https://github.com/JoeyDeVries/LearnOpenGL/tree/6159792dec67ff0ba70f7fd2eafd88b683730e64/resources/objects/vampire).  
+`Capoeira_Mannequin.dae` comes from [mixamo](https://www.mixamo.com/), select "Mannequin" for Characters and "Capoeira" for Animations. Original dancing_vampire.dae from the article could be on [LearnOpenGL github](https://github.com/JoeyDeVries/LearnOpenGL/tree/6159792dec67ff0ba70f7fd2eafd88b683730e64/resources/objects/vampire).  
 
 # How to build
 
