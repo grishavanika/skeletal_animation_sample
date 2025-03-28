@@ -22,7 +22,7 @@ Note on FBX and Assimp:
 
  * FBX and Assimp embed textures; current code supports only embedded png textures.
  * As of Assimp v5.4.3/VCPKG release there are issues with wrong/inverted rotations (? [maybe this bug](https://github.com/assimp/assimp/issues/4714)); latest [head](https://github.com/assimp/assimp/tree/55e635943666241413c7d544556468c66aa11f13) seems to have it fixed, but there are other issues present;
- * try different formats firts (like Collada) to make sure same issue present if any for multiple formats.
+ * try different formats first (like Collada) to make sure same issue present, if any, for multiple formats.
 
 # How to build
 
