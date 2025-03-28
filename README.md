@@ -6,8 +6,7 @@ Example from <https://learnopengl.com/Guest-Articles/2020/Skeletal-Animation>:
 
 # How to run
 
-Use Collada format instead of FBX because the code does not support
-formats with embedded textures; expects texture files to be present on disk:
+Better to use Collada format (FBX code supports only png/embedded textures):
 
 ```
 build\Release\main.exe Capoeira_Mannequin.dae

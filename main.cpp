@@ -207,6 +207,10 @@ private:
 
     glm::mat4 interpolate_position(float animation_time)
     {
+        if (_positions.size() == 1)
+        {
+            return glm::translate(glm::mat4(1.0f), _positions[0].position);
+        }
         const int p0 = UpdateFrameIndex(_positions, animation_time, _prev_position_index, _prev_animation_time);
         _prev_position_index = p0;
         const KeyPosition& prev = _positions[p0];
@@ -218,6 +222,10 @@ private:
 
     glm::mat4 interpolate_rotation(float animation_time)
     {
+        if (_rotations.size() == 1)
+        {
+            return glm::mat4_cast(_rotations[0].orientation);
+        }
         const int p0 = UpdateFrameIndex(_rotations, animation_time, _prev_rotation_index, _prev_animation_time);
         _prev_rotation_index = p0;
         const KeyRotation& prev = _rotations[p0];
@@ -230,6 +238,10 @@ private:
 
     glm::mat4 interpolate_scaling(float animation_time)
     {
+        if (_scales.size() == 1)
+        {
+            return glm::scale(glm::mat4(1.0f), _scales[0].scale);
+        }
         const int p0 = UpdateFrameIndex(_scales, animation_time, _prev_scale_index, _prev_animation_time);
         _prev_scale_index = p0;
         const KeyScale& prev = _scales[p0];
@@ -354,8 +366,15 @@ enum class TextureType
     Invalid, Diffuse, Specular, Normal, Height
 };
 
+struct MemoryTexture
+{
+    // PNG, from Assimp, GetEmbeddedTexture().
+    std::vector<std::uint8_t> png;
+};
+
 struct AnimTexture
 {
+    MemoryTexture memory_texture; // OR
     std::filesystem::path file_path;
     TextureType type = TextureType::Invalid;
 };
@@ -472,10 +491,20 @@ static AnimMesh Assimp_LoadMesh(
             {
                 textures.push_back({});
                 AnimTexture& t = textures.back();
-                t.file_path = model_path.parent_path() / std::string(file_name.data, file_name.length);
                 t.type = type;
-                // Use scene.GetEmbeddedTexture(file_name.C_Str()).
-                assert(std::filesystem::exists(t.file_path));
+                if (const aiTexture* texture = scene.GetEmbeddedTexture(file_name.C_Str()))
+                {
+                    static_assert(sizeof(aiTexel) == 4);
+                    assert(texture->CheckFormat("png"));
+                    std::vector<std::uint8_t>& data = t.memory_texture.png;
+                    data.resize(texture->mWidth);
+                    std::memcpy(data.data(), texture->pcData, texture->mWidth);
+                }
+                else
+                {
+                    t.file_path = model_path.parent_path() / std::string(file_name.data, file_name.length);
+                    assert(std::filesystem::exists(t.file_path));
+                }
             }
         }
     }
@@ -580,6 +609,7 @@ static BoneKeyFrames Assimp_LoadBoneKeyFrames(const aiNodeAnim& channel, const B
     bone._bone_index = bone_info.index;
     bone._model_space_to_bone = bone_info.model_space_to_bone;
 
+    assert(channel.mNumPositionKeys > 0);
     bone._positions.reserve(channel.mNumPositionKeys);
     for (unsigned index = 0; index < channel.mNumPositionKeys; ++index)
     {
@@ -589,6 +619,7 @@ static BoneKeyFrames Assimp_LoadBoneKeyFrames(const aiNodeAnim& channel, const B
         bone._positions.push_back(data);
     }
 
+    assert(channel.mNumRotationKeys > 0);
     bone._rotations.reserve(channel.mNumRotationKeys);
     for (unsigned index = 0; index < channel.mNumRotationKeys; ++index)
     {
@@ -598,6 +629,7 @@ static BoneKeyFrames Assimp_LoadBoneKeyFrames(const aiNodeAnim& channel, const B
         bone._rotations.push_back(data);
     }
 
+    assert(channel.mNumScalingKeys > 0);
     bone._scales.reserve(channel.mNumScalingKeys);
     for (unsigned index = 0; index < channel.mNumScalingKeys; ++index)
     {
@@ -880,8 +912,19 @@ static RenderTexture OpenGL_LoadTexture(const AnimTexture& raw_texture)
     int width = 0;
     int height = 0;
     int components = 0;
-    unsigned char* data = stbi_load(raw_texture.file_path.string().c_str()
-        , &width, &height, &components, 0);
+    unsigned char* data = nullptr;
+    if (raw_texture.memory_texture.png.size() > 0)
+    {
+        data = stbi_load_from_memory(
+            raw_texture.memory_texture.png.data()
+            , int(raw_texture.memory_texture.png.size())
+            , &width, &height, &components, 0);
+    }
+    else
+    {
+        data = stbi_load(raw_texture.file_path.string().c_str()
+            , &width, &height, &components, 0);
+    }
     assert(data);
     GLenum format = GL_RED;
     switch (components)
