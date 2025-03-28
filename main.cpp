@@ -86,6 +86,14 @@ struct BoneKeyFrames
     std::vector<KeyRotation> _rotations;
     std::vector<KeyScale> _scales;
 
+    bool has_any_keyframes() const
+    {
+        const bool all_empty = _positions.empty()
+            && _rotations.empty()
+            && _scales.empty();
+        return !all_empty;
+    }
+
     // "Optimization". Remember previous frame's state
     // to find next frame keys "faster". Can be removed.
     float _prev_animation_time = -1;
@@ -296,7 +304,7 @@ public:
             AnimNode& node = _nodes[i];
             assert(int(i) > node.parent);
 
-            const glm::mat4 bone_transform = node.bone
+            const glm::mat4 bone_transform = (node.bone && node.bone->has_any_keyframes())
                 ? node.bone->interpolate_frames_at(_current_time)
                 : node.node_transform;
             const glm::mat4 parent_transform = (node.parent >= 0)
@@ -313,7 +321,7 @@ public:
             assert(bone_index < _transforms.size()
                 && "Too many bones. See kMaxBonesCount limit.");
             _transforms[bone_index] = _global_inverse
-                 * parent_transform * bone_transform * node.bone->_model_space_to_bone;
+                 * node.bone_transform * node.bone->_model_space_to_bone;
         }
     }
 
@@ -519,9 +527,9 @@ static AnimMesh Assimp_LoadMesh(
     {
         // Don't see Normal texture, but there is Diffuse one.
         // Try to guess Normal file's path.
-        auto name = diffuse_it->file_path.filename().string();
+        std::string name = diffuse_it->file_path.filename().string();
         const char kDiffusePart[] = "diffuse";
-        const auto p = name.find(kDiffusePart);
+        const std::size_t p = name.find(kDiffusePart);
         if (p != name.npos)
         {
             name.replace(p, std::size(kDiffusePart) - 1, "normal");
@@ -694,7 +702,7 @@ static Animation Assimp_LoadAnimation(const aiScene& scene
 
     for (unsigned i = 0; i < animation->mNumChannels; ++i)
     {
-        auto channel = animation->mChannels[i];
+        const aiNodeAnim* channel = animation->mChannels[i];
         const aiString& bone_name = channel->mNodeName;
         auto it = std::find_if(node_names.cbegin(), node_names.cend()
             , [&bone_name](const aiString* node_name)
@@ -709,6 +717,28 @@ static Animation Assimp_LoadAnimation(const aiScene& scene
         AnimNode& node = nodes[index];
         assert(not node.bone.has_value() && "Two or more bones matching same node.");
         node.bone.emplace(Assimp_LoadBoneKeyFrames(*channel, *_bone_info));
+    }
+
+    // Nodes with keyframes are all in from `animation->mNumChannels` above.
+    // Still, setup bones with no keyframes so they participate as others
+    // bones parent with `model_space_to_bone` transform.
+    for (unsigned i = 0; i < nodes.size(); ++i)
+    {
+        AnimNode& node = nodes[i];
+        if (node.bone)
+        {
+            continue;
+        }
+        const aiString* name = node_names[i];
+        const BoneMeshInfo* _bone_info = bone_info.get(name->C_Str());
+        if (!_bone_info)
+        {
+            continue;
+        }
+        BoneKeyFrames& bone = node.bone.emplace();
+        bone._bone_index = _bone_info->index;
+        bone._model_space_to_bone = _bone_info->model_space_to_bone;
+        assert(!bone.has_any_keyframes());
     }
 
     const glm::mat4 root = Matrix_RowToColumn(scene.mRootNode->mTransformation);
@@ -934,7 +964,7 @@ static RenderTexture OpenGL_LoadTexture(const AnimTexture& raw_texture)
     case 4: format = GL_RGBA; break;
     default: assert(false); break;
     }
-    auto texture = RenderTexture::FromMemory(raw_texture.type, format, width, height, data);
+    RenderTexture texture = RenderTexture::FromMemory(raw_texture.type, format, width, height, data);
     stbi_image_free(data);
     return texture;
 }
@@ -1120,7 +1150,7 @@ void main()
     _Color = vec4(color, 1.0f);
 }
 )";
-        auto shader = OpenGL_ShaderProgram::FromBuffers(vertex_shader, fragment_shader);
+        OpenGL_ShaderProgram shader = OpenGL_ShaderProgram::FromBuffers(vertex_shader, fragment_shader);
         RenderModel model(std::move(textures), std::move(shader));
         model._meshes = std::move(meshes);
         const unsigned shader_handle = model._shader._id;
