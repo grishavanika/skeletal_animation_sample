@@ -371,7 +371,7 @@ static glm::quat Quat_ToGLM(const aiQuaternion& pOrientation)
 
 enum class TextureType
 {
-    Invalid, Diffuse, Specular, Normal, Height
+    None, Diffuse, Normal
 };
 
 struct MemoryTexture
@@ -384,7 +384,7 @@ struct AnimTexture
 {
     MemoryTexture memory_texture; // OR
     std::filesystem::path file_path;
-    TextureType type = TextureType::Invalid;
+    TextureType type = TextureType::None;
 };
 
 struct AnimMesh
@@ -485,65 +485,33 @@ static AnimMesh Assimp_LoadMesh(
     } kTexturesToFind[] =
     {
         {aiTextureType_DIFFUSE, TextureType::Diffuse},
-        {aiTextureType_SPECULAR, TextureType::Specular},
-        {aiTextureType_HEIGHT, TextureType::Normal},
-        {aiTextureType_AMBIENT, TextureType::Height},
+        {aiTextureType_NORMALS, TextureType::Normal},
     };
     std::vector<AnimTexture> textures;
     for (auto [assimp_type, type] : kTexturesToFind)
     {
-        for (unsigned i = 0, count = material->GetTextureCount(assimp_type); i < count; ++i)
+		// Get first (0) available texture of a given type.
+        aiString file_name;
+        if (material->GetTexture(assimp_type, 0, &file_name) == aiReturn_SUCCESS)
         {
-            aiString file_name;
-            if (material->GetTexture(assimp_type, i, &file_name) == aiReturn_SUCCESS)
+            textures.push_back({});
+            AnimTexture& t = textures.back();
+            t.type = type;
+            if (const aiTexture* texture = scene.GetEmbeddedTexture(file_name.C_Str()))
             {
-                textures.push_back({});
-                AnimTexture& t = textures.back();
-                t.type = type;
-                if (const aiTexture* texture = scene.GetEmbeddedTexture(file_name.C_Str()))
-                {
-                    static_assert(sizeof(aiTexel) == 4);
-                    assert(texture->CheckFormat("png"));
-                    std::vector<std::uint8_t>& data = t.memory_texture.png;
-                    data.resize(texture->mWidth);
-                    std::memcpy(data.data(), texture->pcData, texture->mWidth);
-                }
-                else
-                {
-                    t.file_path = model_path.parent_path() / std::string(file_name.data, file_name.length);
-                    assert(std::filesystem::exists(t.file_path));
-                }
+                static_assert(sizeof(aiTexel) == 4);
+                assert(texture->CheckFormat("png"));
+                std::vector<std::uint8_t>& data = t.memory_texture.png;
+                data.resize(texture->mWidth);
+                std::memcpy(data.data(), texture->pcData, texture->mWidth);
+            }
+            else
+            {
+                t.file_path = model_path.parent_path() / std::string(file_name.data, file_name.length);
+                assert(std::filesystem::exists(t.file_path));
             }
         }
     }
-
-#if (1) // STUPID HACK. Assimp & COLLADA do not see normal map.
-    auto normal_it = std::find_if(textures.cbegin(), textures.cend()
-        , [](const AnimTexture& t) { return t.type == TextureType::Normal; });
-    auto diffuse_it = std::find_if(textures.cbegin(), textures.cend()
-        , [](const AnimTexture& t) { return t.type == TextureType::Diffuse; });
-    if ((normal_it == textures.cend())
-        && (diffuse_it != textures.cend()))
-    {
-        // Don't see Normal texture, but there is Diffuse one.
-        // Try to guess Normal file's path.
-        std::string name = diffuse_it->file_path.filename().string();
-        const char kDiffusePart[] = "diffuse";
-        const std::size_t p = name.find(kDiffusePart);
-        if (p != name.npos)
-        {
-            name.replace(p, std::size(kDiffusePart) - 1, "normal");
-        }
-        AnimTexture t;
-        t.file_path = diffuse_it->file_path;
-        t.file_path.replace_filename(name);
-        t.type = TextureType::Normal;
-        if (std::filesystem::exists(t.file_path))
-        {
-            textures.push_back(t);
-        }
-    }
-#endif
 
     // Bones weights for each vertex.
     auto add_bone_weight_to_vertex = [](AnimVertex& vertex, BoneIndex bone_index, float weight)
@@ -752,7 +720,7 @@ struct RenderTexture
 {
     bool _loaded = false;
     unsigned texture_name = 0;
-    TextureType type = TextureType::Invalid;
+    TextureType type = TextureType::None;
     explicit RenderTexture() = default;
 
     static RenderTexture FromMemory(TextureType type, GLenum format, int width, int height, const void* data)
@@ -771,7 +739,7 @@ struct RenderTexture
     static RenderTexture Invalid_White()
     {
         unsigned data = 0xffffffff;
-        return RenderTexture::FromMemory(TextureType::Invalid, GL_RGB, 1, 1, &data);
+        return RenderTexture::FromMemory(TextureType::None, GL_RGB, 1, 1, &data);
     }
     ~RenderTexture() noexcept
     {
@@ -783,7 +751,7 @@ struct RenderTexture
     RenderTexture(RenderTexture&& rhs) noexcept
         : _loaded(std::exchange(rhs._loaded, false))
         , texture_name(std::exchange(rhs.texture_name, 0))
-        , type(std::exchange(rhs.type, TextureType::Invalid)) { }
+        , type(std::exchange(rhs.type, TextureType::None)) { }
     RenderTexture& operator=(RenderTexture&&) = delete;
     RenderTexture(const RenderTexture&) = delete;
     RenderTexture& operator=(const RenderTexture&) = delete;
@@ -1255,47 +1223,10 @@ struct AssimpOpenGL_Model
     Animation animation;
 };
 
-static void HandleMissingTexturesIfAny(
-    TexturesDB& textures
-    , std::vector<RenderMesh>& meshes
-    , const char* add_diffuse_texture)
-{
-    const bool has_missing_diffuse = std::any_of(meshes.cbegin(), meshes.cend()
-        , [](const RenderMesh& m) { return (m._diffuse < 0); });
-    if (has_missing_diffuse && !add_diffuse_texture)
-    {
-        std::fprintf(stderr, "Some Model's meshes are missing diffuse texture."
-            " Use '--diffuse <file>' to load file as diffuse texture for all"
-            " such meshes.\n");
-    }
-
-    if (has_missing_diffuse && add_diffuse_texture)
-    {
-        assert(std::filesystem::exists(add_diffuse_texture));
-        const TextureHandle handle = textures.add(OpenGL_LoadTexture(
-            AnimTexture{.file_path = add_diffuse_texture, .type = TextureType::Diffuse}));
-        for (RenderMesh& m : meshes)
-        {
-            if (m._diffuse < 0)
-            {
-                m._diffuse = handle;
-            }
-        }
-    }
-
-    const bool has_missing_normals = std::any_of(meshes.cbegin(), meshes.cend()
-        , [](const RenderMesh& m) { return (m._normal < 0); });
-    if (has_missing_normals)
-    {
-        std::fprintf(stderr, "Some Model's meshes are missing normals texture."
-            " Using per-vertex Normals.\n");
-    }
-}
-
 static AssimpOpenGL_Model AssimpOpenGL_LoadAnimatedModel(
     const std::filesystem::path& model_path
     , int animation_index = -1 // first, by default
-    , const char* add_diffuse_texture = nullptr)
+    )
 {
     Assimp::Importer importer;
     // As per AnimVertex.
@@ -1321,7 +1252,6 @@ static AssimpOpenGL_Model AssimpOpenGL_LoadAnimatedModel(
         Assimp_LoadAnimation(*scene, animation_index, bone_info);
     std::vector<RenderMesh> meshes =
         OpenGL_LoadRenderMesh(textures, std::move(anim_meshes));
-    HandleMissingTexturesIfAny(textures, meshes, add_diffuse_texture);
     RenderModel model = 
         RenderModel::Make_SimpleNormalMapping(std::move(textures), std::move(meshes));
     return AssimpOpenGL_Model{std::move(model), std::move(animation)};
@@ -1507,7 +1437,6 @@ int main(int argc, char* argv[])
     
     const char* const path = argv[1];
     const float model_scale = Get_ArgFloat(argc, argv, "--scale", 0.012f);
-    const char* const diffuse_texture = Get_ArgStr(argc, argv, "--diffuse");
     const int animation_index = int(Get_ArgFloat(argc, argv, "--animation", -1.f));
     const float time_speed = Get_ArgFloat(argc, argv, "--speed", 1.f);
 
@@ -1517,10 +1446,6 @@ int main(int argc, char* argv[])
     if (animation_index >= 0)
     {
         std::fprintf(stdout, "Animation index to load: %i.\n", animation_index);
-    }
-    if (diffuse_texture)
-    {
-        std::fprintf(stdout, "Diffuse texture for meshes with missing ones: '%s'.\n", diffuse_texture);
     }
 
     glfwInit();
@@ -1549,7 +1474,7 @@ int main(int argc, char* argv[])
 #endif
 
     auto [render_model, animation] = AssimpOpenGL_LoadAnimatedModel(
-        path, animation_index, diffuse_texture);
+        path, animation_index);
 
     app.camera.force_refresh();
     while (!glfwWindowShouldClose(window))
