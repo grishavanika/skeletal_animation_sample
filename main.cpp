@@ -214,6 +214,7 @@ private:
 
     glm::mat4 interpolate_position(float animation_time)
     {
+        assert(_positions.size() > 0);
         if (_positions.size() == 1)
         {
             return glm::translate(glm::mat4(1.0f), _positions[0].position);
@@ -229,6 +230,7 @@ private:
 
     glm::mat4 interpolate_rotation(float animation_time)
     {
+        assert(_rotations.size() > 0);
         if (_rotations.size() == 1)
         {
             return glm::mat4_cast(_rotations[0].orientation);
@@ -245,6 +247,7 @@ private:
 
     glm::mat4 interpolate_scaling(float animation_time)
     {
+        assert(_scales.size() > 0);
         if (_scales.size() == 1)
         {
             return glm::scale(glm::mat4(1.0f), _scales[0].scale);
@@ -337,13 +340,9 @@ public:
         return std::span<const glm::mat4>(ptr, count);
     }
 
-    void dump()
+    void debug_dump()
     {
-        int id_length = int(strlen("id"));
-        int name_length = int(strlen("name"));
-        int parent_id_length = int(strlen("parent id"));
-        int children_ids_length = int(strlen("children ids"));
-
+        // For each node, collect its children.
         std::vector<std::vector<int>> children_ids;
         children_ids.resize(_nodes.size());
         for (int i = 0, count = int(_nodes.size()); i < count; ++i)
@@ -368,45 +367,51 @@ public:
             return str;
         };
 
+        // Evaluate each column max width.
+        int id_width = int(strlen("id"));
+        int name_width = int(strlen("name"));
+        int parent_id_width = int(strlen("parent id"));
+        int children_ids_width = int(strlen("children ids"));
+
         // id max
-        id_length = std::max(id_length, int(std::to_string(_nodes.size()).size()));
-        id_length += 1;
+        id_width = std::max(id_width, int(std::to_string(_nodes.size()).size()));
+        id_width += 1;
         // name max
         for (const AnimNode& n : _nodes)
         {
-            name_length = std::max(name_length, int(n.debug_name.size()));
+            name_width = std::max(name_width, int(n.debug_name.size()));
         }
-        name_length += 1;
+        name_width += 1;
         // parent id max
-        parent_id_length = std::max(parent_id_length, int(std::to_string(_nodes.size()).size()));
-        parent_id_length += 1;
+        parent_id_width = std::max(parent_id_width, int(std::to_string(_nodes.size()).size()));
+        parent_id_width += 1;
         // children ids max
         for (const std::vector<int>& ids : children_ids)
         {
-            children_ids_length = std::max(children_ids_length, int(ids_to_str(ids).size()));
+            children_ids_width = std::max(children_ids_width, int(ids_to_str(ids).size()));
         }
-        children_ids_length += 1;
+        children_ids_width += 1;
 
-        std::printf("%-*s|", id_length, "id");
-        std::printf("%-*s|", name_length, "name");
-        std::printf("%-*s|", parent_id_length, "parent id");
-        std::printf("%-*s|", children_ids_length, "children ids");
+        std::printf("%-*s|", id_width, "id");
+        std::printf("%-*s|", name_width, "name");
+        std::printf("%-*s|", parent_id_width, "parent id");
+        std::printf("%-*s|", children_ids_width, "children ids");
         std::printf("\n");
 
         for (int i = 0, count = int(_nodes.size()); i < count; ++i)
         {
             const AnimNode& n = _nodes[i];
-            std::printf("%-*i|", id_length, i);
-            std::printf("%-*s|", name_length, n.debug_name.c_str());
+            std::printf("%-*i|", id_width, i);
+            std::printf("%-*s|", name_width, n.debug_name.c_str());
             if (n.parent >= 0)
             {
-                std::printf("%-*i|", parent_id_length, n.parent);
+                std::printf("%-*i|", parent_id_width, n.parent);
             }
             else
             {
-                std::printf("%-*s|", parent_id_length, "-");
+                std::printf("%-*s|", parent_id_width, "-");
             }
-            std::printf("%-*s|", children_ids_length, ids_to_str(children_ids[i]).c_str());
+            std::printf("%-*s|", children_ids_width, ids_to_str(children_ids[i]).c_str());
             std::printf("\n");
         }
     }
@@ -924,12 +929,12 @@ public:
     RenderMesh& operator=(const RenderMesh&) = delete;
     RenderMesh& operator=(RenderMesh&&) = delete;
     RenderMesh(RenderMesh&& rhs) noexcept
-        : _VAO(std::exchange(rhs._VAO, 0))
+        : _diffuse(std::move(rhs._diffuse))
+        , _normal(std::move(rhs._normal))
+        , _VAO(std::exchange(rhs._VAO, 0))
         , _VBO(std::exchange(rhs._VBO, 0))
         , _EBO(std::exchange(rhs._EBO, 0))
         , _indicies_count(std::exchange(rhs._indicies_count, 0))
-        , _diffuse(std::move(rhs._diffuse))
-        , _normal(std::move(rhs._normal))
     {
     }
     ~RenderMesh()
@@ -966,12 +971,12 @@ public:
 private:
     explicit RenderMesh(unsigned VAO, unsigned VBO, unsigned EBO
         , std::size_t indicies_count, TextureHandle diffuse, TextureHandle normal)
-        : _VAO(VAO)
+        : _diffuse(diffuse)
+        , _normal(normal)
+        , _VAO(VAO)
         , _VBO(VBO)
         , _EBO(EBO)
         , _indicies_count(indicies_count)
-        , _diffuse(diffuse)
-        , _normal(normal)
     {
     }
     unsigned _VAO;
@@ -1551,7 +1556,7 @@ int main(int argc, char* argv[])
     auto [render_model, animation] = AssimpOpenGL_LoadAnimatedModel(
         path, animation_index);
 
-    animation.dump();
+    animation.debug_dump();
 
     app.camera.force_refresh();
     while (!glfwWindowShouldClose(window))
