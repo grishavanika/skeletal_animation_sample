@@ -337,6 +337,80 @@ public:
         return std::span<const glm::mat4>(ptr, count);
     }
 
+    void dump()
+    {
+        int id_length = int(strlen("id"));
+        int name_length = int(strlen("name"));
+        int parent_id_length = int(strlen("parent id"));
+        int children_ids_length = int(strlen("children ids"));
+
+        std::vector<std::vector<int>> children_ids;
+        children_ids.resize(_nodes.size());
+        for (int i = 0, count = int(_nodes.size()); i < count; ++i)
+        {
+            const AnimNode& n = _nodes[i];
+            if (n.parent >= 0)
+            {
+                children_ids[n.parent].push_back(i);
+            }
+        }
+        auto ids_to_str = [](const std::vector<int>& ids)
+        {
+            std::string str;
+            for (int i = 0, count = int(ids.size()); i < count; ++i)
+            {
+                str += std::to_string(ids[i]);
+                if (i < (count - 1))
+                {
+                    str += ' ';
+                }
+            }
+            return str;
+        };
+
+        // id max
+        id_length = std::max(id_length, int(std::to_string(_nodes.size()).size()));
+        id_length += 1;
+        // name max
+        for (const AnimNode& n : _nodes)
+        {
+            name_length = std::max(name_length, int(n.debug_name.size()));
+        }
+        name_length += 1;
+        // parent id max
+        parent_id_length = std::max(parent_id_length, int(std::to_string(_nodes.size()).size()));
+        parent_id_length += 1;
+        // children ids max
+        for (const std::vector<int>& ids : children_ids)
+        {
+            children_ids_length = std::max(children_ids_length, int(ids_to_str(ids).size()));
+        }
+        children_ids_length += 1;
+
+        std::printf("%-*s|", id_length, "id");
+        std::printf("%-*s|", name_length, "name");
+        std::printf("%-*s|", parent_id_length, "parent id");
+        std::printf("%-*s|", children_ids_length, "children ids");
+        std::printf("\n");
+
+        for (int i = 0, count = int(_nodes.size()); i < count; ++i)
+        {
+            const AnimNode& n = _nodes[i];
+            std::printf("%-*i|", id_length, i);
+            std::printf("%-*s|", name_length, n.debug_name.c_str());
+            if (n.parent >= 0)
+            {
+                std::printf("%-*i|", parent_id_length, n.parent);
+            }
+            else
+            {
+                std::printf("%-*s|", parent_id_length, "-");
+            }
+            std::printf("%-*s|", children_ids_length, ids_to_str(children_ids[i]).c_str());
+            std::printf("\n");
+        }
+    }
+
 private:
     glm::mat4 _global_inverse;
     std::vector<glm::mat4> _transforms;
@@ -1476,6 +1550,8 @@ int main(int argc, char* argv[])
 
     auto [render_model, animation] = AssimpOpenGL_LoadAnimatedModel(
         path, animation_index);
+
+    animation.dump();
 
     app.camera.force_refresh();
     while (!glfwWindowShouldClose(window))
