@@ -1,9 +1,8 @@
-// Skeletal Animation example from
-// https://learnopengl.com/Guest-Articles/2020/Skeletal-Animation.
+// Skeletal Animation example from https://learnopengl.com/Guest-Articles/2020/Skeletal-Animation.
 // Refactored and simplified.
 // 
-// `_global_inverse` fix comes from https://ogldev.org/www/tutorial38/tutorial38.html.
-// See `m_GlobalInverseTransform`.
+// + `_global_inverse` fix comes from https://ogldev.org/www/tutorial38/tutorial38.html.
+//   See `m_GlobalInverseTransform`.
 // 
 
 #include <assimp/Importer.hpp>
@@ -81,7 +80,7 @@ struct BoneKeyFrames
 {
     // Constant run-time data.
     BoneIndex _bone_index = -1;
-    glm::mat4 _model_space_to_bone = glm::mat4(1.f);
+    glm::mat4 _inverse_bind_pose = glm::mat4(1.f);
     std::vector<KeyPosition> _positions;
     std::vector<KeyRotation> _rotations;
     std::vector<KeyScale> _scales;
@@ -264,11 +263,13 @@ struct AnimNode
 {
     // Runtime. Updated every frame.
     std::optional<BoneKeyFrames> bone;
-    glm::mat4 bone_transform;
+    glm::mat4 transform;
 
     // Constant data.
     int parent = -1;
-    glm::mat4 node_transform;
+    // Relative to parent.
+    glm::mat4 local_transform;
+    std::string debug_name;
 };
 
 class Animation
@@ -304,13 +305,13 @@ public:
             AnimNode& node = _nodes[i];
             assert(int(i) > node.parent);
 
-            const glm::mat4 bone_transform = (node.bone && node.bone->has_any_keyframes())
+            const glm::mat4 transform = (node.bone && node.bone->has_any_keyframes())
                 ? node.bone->interpolate_frames_at(_current_time)
-                : node.node_transform;
+                : node.local_transform;
             const glm::mat4 parent_transform = (node.parent >= 0)
-                ? _nodes[node.parent].bone_transform
+                ? _nodes[node.parent].transform
                 : glm::mat4(1.0f);
-            node.bone_transform = parent_transform * bone_transform;
+            node.transform = parent_transform * transform;
 
             if (!node.bone)
             {
@@ -320,8 +321,10 @@ public:
             const std::size_t bone_index = node.bone->_bone_index;
             assert(bone_index < _transforms.size()
                 && "Too many bones. See kMaxBonesCount limit.");
+
             _transforms[bone_index] = _global_inverse
-                 * node.bone_transform * node.bone->_model_space_to_bone;
+                * node.transform
+                * node.bone->_inverse_bind_pose;
         }
     }
 
@@ -400,7 +403,7 @@ struct BoneMeshInfo
     BoneIndex index = -1;
     // Inverse-bind matrix or inverse bind pose matrix or "offset" matrix:
     // https://stackoverflow.com/questions/50143649/what-does-moffsetmatrix-actually-do-in-assimp.
-    glm::mat4 model_space_to_bone;
+    glm::mat4 inverse_bind_pose;
 };
 
 // Helper to remap bones with string names to indexes to array.
@@ -410,21 +413,22 @@ struct BoneInfoRemap
     std::map<std::string, BoneMeshInfo, std::less<>> _name_to_info;
     BoneIndex _next_bone_id = 0;
 
-    BoneIndex add_new_bone(std::string&& name, glm::mat4 bone_to_model)
+    BoneIndex add_new_bone(std::string&& name, glm::mat4 inverse_bind_pose)
     {
         auto [it, inserted] = _name_to_info.insert(
-            std::make_pair(std::move(name), BoneMeshInfo{-1, bone_to_model}));
+            std::make_pair(std::move(name), BoneMeshInfo{}));
         if (inserted)
         {
             BoneMeshInfo& info = it->second;
             info.index = _next_bone_id++;
+            info.inverse_bind_pose = inverse_bind_pose;
             return info.index;
         }
         else
         {
             // This bone already exists. Transform MUST be the same.
             const BoneMeshInfo& old_info = it->second;
-            assert(old_info.model_space_to_bone == bone_to_model);
+            assert(old_info.inverse_bind_pose == inverse_bind_pose);
             return old_info.index;
         }
     }
@@ -583,7 +587,7 @@ static BoneKeyFrames Assimp_LoadBoneKeyFrames(const aiNodeAnim& channel, const B
 {
     BoneKeyFrames bone;
     bone._bone_index = bone_info.index;
-    bone._model_space_to_bone = bone_info.model_space_to_bone;
+    bone._inverse_bind_pose = bone_info.inverse_bind_pose;
 
     assert(channel.mNumPositionKeys > 0);
     bone._positions.reserve(channel.mNumPositionKeys);
@@ -639,7 +643,6 @@ static Animation Assimp_LoadAnimation(const aiScene& scene
     const float duration = float(animation->mDuration);
     const float ticks_per_second = float(animation->mTicksPerSecond);
     std::vector<AnimNode> nodes;
-    std::vector<const aiString*> node_names;
 
     struct Node
     {
@@ -656,10 +659,10 @@ static Animation Assimp_LoadAnimation(const aiScene& scene
 
         AnimNode node;
         node.parent = data.parent;
-        node.node_transform = Matrix_RowToColumn(data.src->mTransformation);
+        node.local_transform = Matrix_RowToColumn(data.src->mTransformation);
+        node.debug_name = data.src->mName.C_Str();
         assert(node.parent < int(nodes.size()));
-        nodes.push_back(node);
-        node_names.push_back(&data.src->mName);
+        nodes.push_back(std::move(node));
         const int parent_index = int(nodes.size() - 1);
 
         for (unsigned i = 0; i < data.src->mNumChildren; ++i)
@@ -672,13 +675,13 @@ static Animation Assimp_LoadAnimation(const aiScene& scene
     {
         const aiNodeAnim* channel = animation->mChannels[i];
         const aiString& bone_name = channel->mNodeName;
-        auto it = std::find_if(node_names.cbegin(), node_names.cend()
-            , [&bone_name](const aiString* node_name)
+        auto it = std::find_if(nodes.cbegin(), nodes.cend()
+            , [&bone_name](const AnimNode& n)
         {
-            return (bone_name == *node_name);
+            return n.debug_name == bone_name.C_Str();
         });
-        assert(it != node_names.end() && "No node matching a bone.");
-        const int index = int(std::distance(node_names.cbegin(), it));
+        assert(it != nodes.end() && "No node matching a bone.");
+        const int index = int(std::distance(nodes.cbegin(), it));
         const BoneMeshInfo* _bone_info = bone_info.get(bone_name.C_Str());
         assert(_bone_info && "No bone info remap matching a bone.");
 
@@ -690,22 +693,20 @@ static Animation Assimp_LoadAnimation(const aiScene& scene
     // Nodes with keyframes are all in from `animation->mNumChannels` above.
     // Still, setup bones with no keyframes so they participate as others
     // bones parent with `model_space_to_bone` transform.
-    for (unsigned i = 0; i < nodes.size(); ++i)
+    for (AnimNode& node : nodes)
     {
-        AnimNode& node = nodes[i];
         if (node.bone)
         {
             continue;
         }
-        const aiString* name = node_names[i];
-        const BoneMeshInfo* _bone_info = bone_info.get(name->C_Str());
+        const BoneMeshInfo* _bone_info = bone_info.get(node.debug_name.c_str());
         if (!_bone_info)
         {
             continue;
         }
         BoneKeyFrames& bone = node.bone.emplace();
         bone._bone_index = _bone_info->index;
-        bone._model_space_to_bone = _bone_info->model_space_to_bone;
+        bone._inverse_bind_pose = _bone_info->inverse_bind_pose;
         assert(!bone.has_any_keyframes());
     }
 
