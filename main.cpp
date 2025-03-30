@@ -573,7 +573,7 @@ static AnimMesh Assimp_LoadMesh(
     std::vector<AnimTexture> textures;
     for (auto [assimp_type, type] : kTexturesToFind)
     {
-		// Get first (0) available texture of a given type.
+        // Get first (0) available texture of a given type.
         aiString file_name;
         if (material->GetTexture(assimp_type, 0, &file_name) == aiReturn_SUCCESS)
         {
@@ -713,7 +713,7 @@ static Animation Assimp_LoadAnimation(const aiScene& scene
     if ((scene.mNumAnimations > 1) && (animation_index < 0))
     {
         std::fprintf(stderr, "There are %u animations available."
-            " Use '--animation N' to load animation with index N (0-based).\n"
+            " Use '--animation N' to choose animation. Loading first one.\n"
             , scene.mNumAnimations);
     }
     animation_index = std::max(0, animation_index); // Try to load first one, if nothing specified.
