@@ -1174,15 +1174,25 @@ out vec2 v_UV;
 out vec3 v_Position;
 out vec3 v_Normal;
 out mat3 v_TBN;
+// Debug: highlight with green color.
+flat out int v_Highlight;
 
 void main()
 {
+    int debug_bone_id = -1; // see debug_dump() 'bone id'
+    v_Highlight = 0;
+
     mat4 S = mat4(0.0f);
     for (int i = 0; i < 4; ++i)
     {
         if (in_BoneIds[i] >= 0)
         {
             S += (bone_transforms[in_BoneIds[i]] * in_Weights[i]);
+            // Debug.
+            if (in_BoneIds[i] == debug_bone_id)
+            {
+                v_Highlight = 1;
+            }
         }
     }
     if (in_BoneIds[0] < 0)
@@ -1222,11 +1232,19 @@ in vec2 v_UV;
 in vec3 v_Position;
 in vec3 v_Normal;
 in mat3 v_TBN;
+// Debug: highlight with green.
+flat in int v_Highlight;
 
 out vec4 _Color;
 
 void main()
 {
+    if (v_Highlight == 1)
+    {
+        _Color = vec4(0.0f, 1.0f, 0.0f, 1.0f);
+        return;
+    }
+
     vec3 light_color = vec3(1.0f, 1.0f, 1.0f);
     float abbient_K = 0.6f;
     float specular_K = 1.2f;
