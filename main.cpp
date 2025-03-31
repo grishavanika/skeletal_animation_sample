@@ -273,6 +273,7 @@ struct AnimNode
     // Relative to parent.
     glm::mat4 local_transform;
     std::string debug_name;
+    int debug_vertices = -1;
 };
 
 class Animation
@@ -364,7 +365,7 @@ public:
                     str += ' ';
                 }
             }
-            return str;
+            return (str.empty() ? "-" : str);
         };
 
         // Evaluate each column max width.
@@ -372,30 +373,49 @@ public:
         int name_width = int(strlen("name"));
         int parent_id_width = int(strlen("parent id"));
         int children_ids_width = int(strlen("children ids"));
+        int bone_id_width = int(strlen("bone id"));
+        int vertices_width = int(strlen("vertices"));
 
         // id max
-        id_width = std::max(id_width, int(std::to_string(_nodes.size()).size()));
+        id_width = std::max(id_width
+            , int(std::to_string(_nodes.size()).size()));
         id_width += 1;
         // name max
         for (const AnimNode& n : _nodes)
         {
-            name_width = std::max(name_width, int(n.debug_name.size()));
+            name_width = std::max(name_width
+                , int(n.debug_name.size()));
         }
         name_width += 1;
         // parent id max
-        parent_id_width = std::max(parent_id_width, int(std::to_string(_nodes.size()).size()));
+        parent_id_width = std::max(parent_id_width
+            , int(std::to_string(_nodes.size()).size()));
         parent_id_width += 1;
         // children ids max
         for (const std::vector<int>& ids : children_ids)
         {
-            children_ids_width = std::max(children_ids_width, int(ids_to_str(ids).size()));
+            children_ids_width = std::max(children_ids_width
+                , int(ids_to_str(ids).size()));
         }
         children_ids_width += 1;
+        // bone id max
+        bone_id_width = std::max(bone_id_width
+            , int(std::to_string(_nodes.size()).size()));
+        bone_id_width += 1;
+        // vertices max
+        for (const AnimNode& n : _nodes)
+        {
+            vertices_width = std::max(vertices_width
+                , int(std::to_string(n.debug_vertices).size()));
+        }
+        vertices_width += 1;
 
         std::printf("%-*s|", id_width, "id");
         std::printf("%-*s|", name_width, "name");
         std::printf("%-*s|", parent_id_width, "parent id");
         std::printf("%-*s|", children_ids_width, "children ids");
+        std::printf("%-*s|", bone_id_width, "bone id");
+        std::printf("%-*s|", vertices_width, "vertices");
         std::printf("\n");
 
         for (int i = 0, count = int(_nodes.size()); i < count; ++i)
@@ -412,6 +432,22 @@ public:
                 std::printf("%-*s|", parent_id_width, "-");
             }
             std::printf("%-*s|", children_ids_width, ids_to_str(children_ids[i]).c_str());
+            if (n.bone)
+            {
+                std::printf("%-*i|", bone_id_width, n.bone->_bone_index);
+            }
+            else
+            {
+                std::printf("%-*s|", bone_id_width, "-");
+            }
+            if (n.debug_vertices > 0)
+            {
+                std::printf("%-*i|", vertices_width, n.debug_vertices);
+            }
+            else
+            {
+                std::printf("%-*s|", vertices_width, "-");
+            }
             std::printf("\n");
         }
     }
@@ -487,10 +523,13 @@ struct BoneMeshInfo
 
 // Helper to remap bones with string names to indexes to array.
 // Used while loading ASSIMP model. Not needed after loading.
-struct BoneInfoRemap
+struct BonesInfoRemap
 {
     std::map<std::string, BoneMeshInfo, std::less<>> _name_to_info;
     BoneIndex _next_bone_id = 0;
+
+    // Debug, record amount of vertices each bone affects.
+    std::map<BoneIndex, int> _debug_bone_vertices;
 
     BoneIndex add_new_bone(std::string&& name, glm::mat4 inverse_bind_pose)
     {
@@ -517,13 +556,30 @@ struct BoneInfoRemap
         auto it = _name_to_info.find(name);
         return ((it != _name_to_info.end()) ? &(it->second) : nullptr);
     }
+
+    bool has_any_bones() const
+    {
+        return (_name_to_info.size() > 0);
+    }
+
+    void record_vertex(BoneIndex bone_index)
+    {
+        assert(bone_index >= 0);
+        ++_debug_bone_vertices[bone_index];
+    }
+
+    int vertices_count(BoneIndex bone_index) const
+    {
+        auto it = _debug_bone_vertices.find(bone_index);
+        return ((it != _debug_bone_vertices.end()) ? it->second : -1);
+    }
 };
 
 static AnimMesh Assimp_LoadMesh(
     const std::filesystem::path& model_path
     , const aiScene& scene
     , const aiMesh& mesh
-    , BoneInfoRemap& bone_info)
+    , BonesInfoRemap& bones_info)
 {
     // Vertices.
     std::vector<AnimVertex> vertices;
@@ -612,7 +668,7 @@ static AnimMesh Assimp_LoadMesh(
     for (unsigned i = 0; i < mesh.mNumBones; ++i)
     {
         const aiString& bone_name = mesh.mBones[i]->mName;
-        const BoneIndex bone_index = bone_info.add_new_bone(
+        const BoneIndex bone_index = bones_info.add_new_bone(
             std::string(bone_name.data, bone_name.length)
             , Matrix_RowToColumn(mesh.mBones[i]->mOffsetMatrix));
         const aiBone* const bone = mesh.mBones[i];
@@ -624,6 +680,7 @@ static AnimMesh Assimp_LoadMesh(
             const float weight = weights[j].mWeight;
             assert(vertex_id <= vertices.size());
             add_bone_weight_to_vertex(vertices[vertex_id], bone_index, weight);
+            bones_info.record_vertex(bone_index);
         }
     }
 
@@ -637,7 +694,7 @@ static AnimMesh Assimp_LoadMesh(
 static std::vector<AnimMesh> Assimp_LoadModelMeshWithAnimationsWeights(
     const std::filesystem::path& model_path
     , const aiScene& scene
-    , BoneInfoRemap& bone_info)
+    , BonesInfoRemap& bones_info)
 {
     std::vector<AnimMesh> meshes;
 
@@ -652,7 +709,7 @@ static std::vector<AnimMesh> Assimp_LoadModelMeshWithAnimationsWeights(
         {
             const aiMesh* const mesh = scene.mMeshes[node->mMeshes[i]];
             assert(mesh);
-            meshes.push_back(Assimp_LoadMesh(model_path, scene, *mesh, bone_info));
+            meshes.push_back(Assimp_LoadMesh(model_path, scene, *mesh, bones_info));
         }
         for (unsigned i = 0; i < node->mNumChildren; ++i)
         {
@@ -703,7 +760,7 @@ static BoneKeyFrames Assimp_LoadBoneKeyFrames(const aiNodeAnim& channel, const B
 
 static Animation Assimp_LoadAnimation(const aiScene& scene
     , int animation_index // -1 - load first one by default
-    , const BoneInfoRemap& bone_info)
+    , const BonesInfoRemap& bones_info)
 {
     if (scene.mNumAnimations == 0)
     {
@@ -713,7 +770,7 @@ static Animation Assimp_LoadAnimation(const aiScene& scene
     if ((scene.mNumAnimations > 1) && (animation_index < 0))
     {
         std::fprintf(stderr, "There are %u animations available."
-            " Use '--animation N' to choose animation. Loading first one.\n"
+            " Use '--animation N' to choose different animation. Loading first one.\n"
             , scene.mNumAnimations);
     }
     animation_index = std::max(0, animation_index); // Try to load first one, if nothing specified.
@@ -761,12 +818,16 @@ static Animation Assimp_LoadAnimation(const aiScene& scene
         });
         assert(it != nodes.end() && "No node matching a bone.");
         const int index = int(std::distance(nodes.cbegin(), it));
-        const BoneMeshInfo* _bone_info = bone_info.get(bone_name.C_Str());
-        assert(_bone_info && "No bone info remap matching a bone.");
-
+        const BoneMeshInfo* info = bones_info.get(bone_name.C_Str());
+        if (!info)
+        {
+            std::fprintf(stderr, "No bone info for a node '%s' found.\n", bone_name.C_Str());
+            continue;
+        }
         AnimNode& node = nodes[index];
         assert(not node.bone.has_value() && "Two or more bones matching same node.");
-        node.bone.emplace(Assimp_LoadBoneKeyFrames(*channel, *_bone_info));
+        node.bone.emplace(Assimp_LoadBoneKeyFrames(*channel, *info));
+        node.debug_vertices = bones_info.vertices_count(node.bone->_bone_index);
     }
 
     // Nodes with keyframes are all in from `animation->mNumChannels` above.
@@ -778,19 +839,20 @@ static Animation Assimp_LoadAnimation(const aiScene& scene
         {
             continue;
         }
-        const BoneMeshInfo* _bone_info = bone_info.get(node.debug_name.c_str());
-        if (!_bone_info)
+        const BoneMeshInfo* info = bones_info.get(node.debug_name.c_str());
+        if (!info)
         {
             continue;
         }
         BoneKeyFrames& bone = node.bone.emplace();
-        bone._bone_index = _bone_info->index;
-        bone._inverse_bind_pose = _bone_info->inverse_bind_pose;
+        bone._bone_index = info->index;
+        bone._inverse_bind_pose = info->inverse_bind_pose;
+        node.debug_vertices = bones_info.vertices_count(node.bone->_bone_index);
         assert(!bone.has_any_keyframes());
     }
 
     const glm::mat4 root = Matrix_RowToColumn(scene.mRootNode->mTransformation);
-    const unsigned bones_count = unsigned(bone_info._name_to_info.size());
+    const unsigned bones_count = unsigned(bones_info._name_to_info.size());
     return Animation(glm::inverse(root), std::move(nodes), bones_count, duration, ticks_per_second);
 }
 
@@ -1324,12 +1386,16 @@ static AssimpOpenGL_Model AssimpOpenGL_LoadAnimatedModel(
     assert((scene->mFlags & AI_SCENE_FLAGS_INCOMPLETE) == 0);
     assert(scene->mRootNode);
 
-    BoneInfoRemap bone_info;
+    BonesInfoRemap bones_info;
     TexturesDB textures;
     std::vector<AnimMesh> anim_meshes =
-        Assimp_LoadModelMeshWithAnimationsWeights(model_path, *scene, bone_info);
+        Assimp_LoadModelMeshWithAnimationsWeights(model_path, *scene, bones_info);
+    if (!bones_info.has_any_bones())
+    {
+        std::fprintf(stderr, "There is no single mesh with bones info.\n");
+    }
     Animation animation =
-        Assimp_LoadAnimation(*scene, animation_index, bone_info);
+        Assimp_LoadAnimation(*scene, animation_index, bones_info);
     std::vector<RenderMesh> meshes =
         OpenGL_LoadRenderMesh(textures, std::move(anim_meshes));
     RenderModel model = 
