@@ -138,3 +138,25 @@ Vertex shader in main.cpp has `int debug_bone_id = -1` config. Setting it to an 
 
 ![](highlight_8.png)
 
+### Render joints/bones only
+
+(Not submitted). Render joints/bones as (red) points:
+
+```
+// Animation::update().
+std::vector<glm::mat4> _nodes_transforms;
+_nodes_transforms[bone_index] = _global_inverse * node.transform;
+
+// Render.
+render_points._points.clear();
+for (glm::mat4 m : animation.nodes_transforms())
+{
+    const glm::vec4 p = m * glm::vec4(0.0f, 0.0f, 0.0f, 1.0f);
+    render_points._points.push_back(glm::vec3(p / p.w));
+}
+glDisable(GL_DEPTH_TEST);
+render_points.draw(mvp);
+glEnable(GL_DEPTH_TEST);
+```
+
+![](bones.gif)
