@@ -1391,6 +1391,8 @@ static AssimpOpenGL_Model AssimpOpenGL_LoadAnimatedModel(
     Assimp::Importer importer;
     // As per AnimVertex.
     (void)importer.SetPropertyInteger(AI_CONFIG_PP_LBW_MAX_WEIGHTS, 4);
+    // Seems to fix FBX import for Mixamo.
+    (void)importer.SetPropertyBool(AI_CONFIG_IMPORT_FBX_PRESERVE_PIVOTS, false);
     const aiScene* scene = importer.ReadFile(model_path.string()
         , aiProcess_Triangulate
         | aiProcess_CalcTangentSpace
