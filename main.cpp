@@ -1614,15 +1614,18 @@ int main(int argc, char* argv[])
         std::fprintf(stdout, "Animation index to load: %i.\n", animation_index);
     }
 
-    glfwInit();
+    const int glfw_ok = glfwInit();
+    assert((glfw_ok == GLFW_TRUE) && "Failed to initialize GLFW");
     glfwWindowHint(GLFW_CONTEXT_VERSION_MAJOR, 3);
     glfwWindowHint(GLFW_CONTEXT_VERSION_MINOR, 3);
+    // See macOS notes here: https://www.glfw.org/docs/3.3/window_guide.html#GLFW_OPENGL_FORWARD_COMPAT_hint.
     glfwWindowHint(GLFW_OPENGL_PROFILE, GLFW_OPENGL_CORE_PROFILE);
+    glfwWindowHint(GLFW_OPENGL_FORWARD_COMPAT, GL_TRUE);
     glfwWindowHint(GLFW_SAMPLES, 4);
 
     AppState app;
     GLFWwindow* window = glfwCreateWindow(app.screen_width, app.screen_height, "App", nullptr, nullptr);
-    assert(window && "Failed to create window.");
+    assert(window && "Failed to create window");
     glfwSetWindowUserPointer(window, &app);
     glfwMakeContextCurrent(window);
     glfwSetFramebufferSizeCallback(window, OnWindowResize);
@@ -1630,8 +1633,8 @@ int main(int argc, char* argv[])
     glfwSetScrollCallback(window, OnMouseScroll);
     glfwSetKeyCallback(window, OnKeyEvent);
     glfwSetInputMode(window, GLFW_CURSOR, GLFW_CURSOR_DISABLED);
-    const int glad_ok = gladLoadGL();
-    assert(glad_ok > 0);
+    const int glad_ok = gladLoadGLLoader(GLADloadproc(glfwGetProcAddress));
+    assert((glad_ok > 0) && "Failed to initialize GLAD");
 
     glEnable(GL_DEPTH_TEST);
     glEnable(GL_MULTISAMPLE);
